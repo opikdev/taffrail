@@ -8,6 +8,8 @@ const VERSION_BODY: &str = r#"{"major":"1","minor":"35","gitVersion":"v1.35.0","
 /// What the fake Kubernetes API server answers with.
 pub struct Fixture {
     pub pod_list: String,
+    pub pod: String,
+    pub events: String,
     pub logs: String,
 }
 
@@ -55,6 +57,10 @@ fn serve_request(stream: TcpStream, fixture: &Fixture) {
         respond(&stream, &fixture.pod_list);
     } else if request_line.contains("/log?") {
         respond(&stream, &fixture.logs);
+    } else if request_line.contains("/events") {
+        respond(&stream, &fixture.events);
+    } else if request_line.contains("/pods/") {
+        respond(&stream, &fixture.pod);
     } else {
         respond(&stream, VERSION_BODY);
     }

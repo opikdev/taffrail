@@ -5,7 +5,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::table::{DataTable, TableState};
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IndexPath, Sizable, Size, StyledExt, Theme, TitleBar, h_flex,
     v_flex,
@@ -16,11 +16,28 @@ use taffrail_core::{
     Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodSnapshot,
 };
 
+use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane};
 use crate::logs::{LogPane, dock_height};
-use crate::pods::PodTable;
+use crate::pods::{PodTable, show_in_place};
 use crate::sidebar::resource_sidebar;
 
 type ContextPicker = SelectState<Vec<String>>;
+
+actions!(taffrail, [NextRow, PreviousRow, CloseDetails]);
+
+const KEY_CONTEXT: &str = "Taffrail";
+const TABLE_KEYS: &str = "Taffrail && !Input";
+
+/// Binds the keys that act on the pod table when no text field has focus.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("j", NextRow, Some(TABLE_KEYS)),
+        KeyBinding::new("down", NextRow, Some(TABLE_KEYS)),
+        KeyBinding::new("k", PreviousRow, Some(TABLE_KEYS)),
+        KeyBinding::new("up", PreviousRow, Some(TABLE_KEYS)),
+        KeyBinding::new("escape", CloseDetails, Some(TABLE_KEYS)),
+    ]);
+}
 
 const TITLE_BAR_HEIGHT: f32 = 40.;
 const PANEL_HEADER_HEIGHT: f32 = 44.;
@@ -100,11 +117,15 @@ pub struct Root {
     filter: Entity<InputState>,
     connection: Option<Connection>,
     logs: Option<Entity<LogPane>>,
+    details: Option<Entity<DetailsPane>>,
+    focus_handle: FocusHandle,
     session: Session,
     sidebar_collapsed: bool,
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
+    _table_events: Subscription,
+    _details_events: Option<Subscription>,
     _appearance: Subscription,
 }
 
@@ -119,7 +140,6 @@ impl Root {
             TableState::new(PodTable::default(), window, cx)
                 .col_movable(false)
                 .col_resizable(false)
-                .sortable(false)
                 .row_selectable(false)
         });
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter pods"));
@@ -129,6 +149,15 @@ impl Root {
                 this.apply_filter(filter, cx);
             }
         });
+        let table_events =
+            cx.subscribe_in(&pods, window, |this, _, event: &TableEvent, window, cx| {
+                if matches!(event, TableEvent::SelectRow(_)) {
+                    this.focus_handle.focus(window, cx);
+                    this.open_details(cx);
+                }
+            });
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
@@ -140,11 +169,15 @@ impl Root {
             filter,
             connection: None,
             logs: None,
+            details: None,
+            focus_handle,
             session: Session::ChooseContext,
             sidebar_collapsed: false,
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
+            _table_events: table_events,
+            _details_events: None,
             _appearance: appearance,
         };
         root.load_contexts(contexts, window, cx);
@@ -206,6 +239,7 @@ impl Root {
         };
         self.connection = None;
         self.logs = None;
+        self.close_details(cx);
         self.show_pods(Arc::default(), cx);
         let connecting = self.backend.connect(contexts, context.clone());
         let backend = self.backend.clone();
@@ -279,17 +313,77 @@ impl Root {
         cx.notify();
     }
 
-    fn log_targets(&self, cx: &App) -> Vec<LogTarget> {
+    fn open_details(&mut self, cx: &mut Context<Self>) {
         let table = self.pods.read(cx).delegate();
-        table.snapshot().log_targets(table.filter())
+        let selected = table.selected().and_then(|key| table.snapshot().find(key));
+        let (Some(row), Some(connection)) = (selected.cloned(), self.connection.clone()) else {
+            return;
+        };
+        let backend = self.backend.clone();
+        let details = cx.new(|cx| DetailsPane::new(backend, connection, row, cx));
+        self._details_events = Some(cx.subscribe(&details, |this, _, event, cx| match event {
+            DetailsEvent::Close => this.close_details(cx),
+        }));
+        self.details = Some(details);
+        cx.notify();
     }
 
-    fn show_pods(&mut self, snapshot: Arc<PodSnapshot>, cx: &mut Context<Self>) {
+    fn close_details(&mut self, cx: &mut Context<Self>) {
+        self.details = None;
+        self._details_events = None;
         self.pods.update(cx, |pods, cx| {
-            pods.delegate_mut().show(snapshot);
+            pods.delegate_mut().clear_selection();
             cx.notify();
         });
         cx.notify();
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let moved = self.pods.update(cx, |pods, cx| {
+            let moved = pods.delegate_mut().move_selection(delta);
+            if let Some(row_ix) = moved {
+                pods.vertical_scroll_handle
+                    .scroll_to_item(row_ix, ScrollStrategy::Nearest);
+            }
+            cx.notify();
+            moved
+        });
+        if moved.is_some() {
+            self.open_details(cx);
+        }
+    }
+
+    /// Selects a row as a click would.
+    #[cfg(feature = "preview")]
+    pub(crate) fn select_first_row(&mut self, cx: &mut Context<Self>) {
+        self.move_selection(1, cx);
+    }
+
+    fn log_targets(&self, cx: &App) -> Vec<LogTarget> {
+        self.pods.read(cx).delegate().log_targets()
+    }
+
+    fn show_pods(&mut self, snapshot: Arc<PodSnapshot>, cx: &mut Context<Self>) {
+        self.pods
+            .update(cx, |pods, cx| show_in_place(pods, snapshot, cx));
+        self.update_details(cx);
+        cx.notify();
+    }
+
+    fn update_details(&mut self, cx: &mut Context<Self>) {
+        let Some(details) = self.details.clone() else {
+            return;
+        };
+        let table = self.pods.read(cx).delegate();
+        let snapshot = table.snapshot();
+        if !snapshot.synced {
+            return;
+        }
+        let row = table.selected().and_then(|key| snapshot.find(key)).cloned();
+        details.update(cx, |details, cx| match row {
+            Some(row) => details.update_row(row, cx),
+            None => details.mark_gone(cx),
+        });
     }
 
     fn apply_filter(&mut self, filter: String, cx: &mut Context<Self>) {
@@ -633,6 +727,12 @@ impl Render for Root {
         let border = cx.theme().border;
         v_flex()
             .size_full()
+            .id("root")
+            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &CloseDetails, _, cx| this.close_details(cx)))
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .child(title_bar)
@@ -656,7 +756,24 @@ impl Render for Root {
                                 .border_color(border)
                                 .bg(cx.theme().background)
                                 .child(header)
-                                .child(content)
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .items_start()
+                                        .child(v_flex().flex_1().min_w_0().h_full().child(content))
+                                        .when_some(self.details.clone(), |row, details| {
+                                            row.child(
+                                                div()
+                                                    .w(px(DETAILS_WIDTH))
+                                                    .flex_shrink_0()
+                                                    .h_full()
+                                                    .border_l_1()
+                                                    .border_color(border)
+                                                    .child(details),
+                                            )
+                                        }),
+                                )
                                 .when_some(self.logs.clone(), |panel, logs| {
                                     panel.child(
                                         div()
@@ -686,11 +803,15 @@ mod tests {
     use taffrail_core::{Backend, Contexts, LogTarget, PodSnapshot};
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
+    const POD_BODY: &str = r#"{"kind":"Pod","apiVersion":"v1","metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app","image":"api:1"}]},"status":{"phase":"Running"}}"#;
+    const EVENTS_BODY: &str = r#"{"kind":"EventList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"e1","namespace":"shop"},"involvedObject":{"kind":"Pod","name":"api-1"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container"}]}"#;
     const LOG_BODY: &str = "2026-01-01T00:00:00Z first line\n";
 
     fn serve_api() -> String {
         serve(Fixture {
             pod_list: POD_LIST_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
         })
     }
@@ -699,7 +820,10 @@ mod tests {
         contexts: Result<Contexts, taffrail_core::ClusterError>,
         cx: &mut TestAppContext,
     ) -> AnyWindowHandle {
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init(cx);
+        });
         let backend = Arc::new(Backend::new().unwrap());
         cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
@@ -873,6 +997,72 @@ users:
             window.click("log-mode", cx);
             window.render_frame(cx);
             assert_eq!(window.find("log-mode").label(), Some("Follow"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn clicking_a_row_opens_its_details_and_escape_closes_them(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_api(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_none());
+            window.click(("row", 0usize), cx);
+        })
+        .unwrap();
+
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("copy-yaml").is_none()
+                && window.find("details-title").label() == Some("api-1")
+                && !window.find_all_by_label("Events 1").is_empty()
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn typing_in_the_filter_does_not_move_the_selection(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_api(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("pod-filter", cx);
+            window.input("j", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_j_key_selects_the_first_pod(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_api(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("j", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("details-title").label(), Some("api-1"));
         })
         .unwrap();
     }

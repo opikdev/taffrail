@@ -1,21 +1,26 @@
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui_kit::component::table::{Column, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme, h_flex};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::table::{Column, TableDelegate, TableEvent, TableState};
+use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{PodRow, PodSnapshot};
+use taffrail_core::{LogTarget, PodKey, PodRow, PodSnapshot, log_targets};
 
+/// The height of one table row, which `Size::Small` sets.
+const ROW_HEIGHT: Pixels = px(30.);
 const NAME: usize = 0;
 const NAMESPACE: usize = 1;
 const STATUS: usize = 2;
 const NODE: usize = 3;
 const READY: usize = 4;
 const RESTARTS: usize = 5;
+const AGE: usize = 6;
 const COLUMNS: [(&str, f32); 7] = [
-    ("Name", 400.),
-    ("Namespace", 140.),
+    ("Name", 320.),
+    ("Namespace", 120.),
     ("Status", 170.),
     ("Node", 130.),
     ("Ready", 64.),
@@ -32,14 +37,14 @@ const CELL_PADDING: Edges<Pixels> = Edges {
 const PANEL_EDGE_PADDING: Pixels = px(12.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tone {
+pub enum Tone {
     Healthy,
     Degraded,
     Failed,
     Neutral,
 }
 
-fn status_tone(status: &str) -> Tone {
+pub fn status_tone(status: &str) -> Tone {
     match status {
         "Running" => Tone::Healthy,
         "Completed" | "Succeeded" => Tone::Neutral,
@@ -49,7 +54,17 @@ fn status_tone(status: &str) -> Tone {
 }
 
 impl Tone {
-    fn color(self, cx: &App) -> Hsla {
+    /// Lower sorts first, so that what needs attention comes first.
+    fn urgency(self) -> u8 {
+        match self {
+            Tone::Failed => 0,
+            Tone::Degraded => 1,
+            Tone::Healthy => 2,
+            Tone::Neutral => 3,
+        }
+    }
+
+    pub fn color(self, cx: &App) -> Hsla {
         match self {
             Tone::Healthy => cx.theme().success,
             Tone::Degraded => cx.theme().warning,
@@ -63,11 +78,20 @@ fn tabular_figures() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortOrder {
+    Ascending,
+    Descending,
+}
+
 #[derive(Default)]
 pub struct PodTable {
     snapshot: Arc<PodSnapshot>,
     filter: String,
+    sort: Option<(usize, SortOrder)>,
     rows: Vec<Arc<PodRow>>,
+    selected: Option<PodKey>,
+    selected_row: Option<usize>,
 }
 
 impl PodTable {
@@ -81,7 +105,7 @@ impl PodTable {
 
     pub fn show(&mut self, snapshot: Arc<PodSnapshot>) {
         self.snapshot = snapshot;
-        self.apply_filter();
+        self.rebuild();
     }
 
     pub fn visible_rows(&self) -> usize {
@@ -90,10 +114,57 @@ impl PodTable {
 
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
-        self.apply_filter();
+        self.rebuild();
     }
 
-    fn apply_filter(&mut self) {
+    /// What a tail would follow: the rows as shown, so the pods on top come first.
+    pub fn log_targets(&self) -> Vec<LogTarget> {
+        log_targets(&self.rows)
+    }
+
+    /// Sorts by a column, then reverses it, then returns to the default order.
+    fn cycle_sort(&mut self, col_ix: usize) {
+        self.sort = match self.sort {
+            Some((sorted, SortOrder::Ascending)) if sorted == col_ix => {
+                Some((col_ix, SortOrder::Descending))
+            }
+            Some((sorted, SortOrder::Descending)) if sorted == col_ix => None,
+            _ => Some((col_ix, SortOrder::Ascending)),
+        };
+        self.rebuild();
+    }
+
+    pub fn selected(&self) -> Option<&PodKey> {
+        self.selected.as_ref()
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_row = None;
+    }
+
+    fn row_key(&self, row_ix: usize) -> Option<PodKey> {
+        self.rows.get(row_ix).map(|row| row.key())
+    }
+
+    fn select_row(&mut self, row_ix: usize) {
+        self.selected = self.row_key(row_ix);
+        self.selected_row = self.selected.is_some().then_some(row_ix);
+    }
+
+    /// Selects the row `delta` away from the selection, or the first row if there is none.
+    /// Returns the row now selected.
+    pub fn move_selection(&mut self, delta: isize) -> Option<usize> {
+        let last = self.rows.len().checked_sub(1)?;
+        let row_ix = match self.selected_row {
+            Some(row_ix) => row_ix.saturating_add_signed(delta).min(last),
+            None => 0,
+        };
+        self.select_row(row_ix);
+        Some(row_ix)
+    }
+
+    fn rebuild(&mut self) {
         self.rows = self
             .snapshot
             .rows
@@ -101,6 +172,13 @@ impl PodTable {
             .filter(|row| row.matches(&self.filter))
             .cloned()
             .collect();
+        sort_rows(&mut self.rows, self.sort);
+        self.selected_row = self.selected.as_ref().and_then(|selected| {
+            let (namespace, name) = selected;
+            self.rows
+                .iter()
+                .position(|row| row.namespace == *namespace && row.name == *name)
+        });
     }
 
     fn cell(&self, row_ix: usize, col_ix: usize) -> SharedString {
@@ -109,6 +187,71 @@ impl PodTable {
         };
         cell_text(row, col_ix, unix_now())
     }
+}
+
+fn ready_counts(ready: &str) -> (u32, u32) {
+    let (ready, total) = ready.split_once('/').unwrap_or_default();
+    (ready.parse().unwrap_or(0), total.parse().unwrap_or(0))
+}
+
+fn urgency(row: &PodRow) -> u8 {
+    status_tone(&row.status).urgency()
+}
+
+/// Snapshot rows arrive sorted by namespace and name, and these sorts are stable, so equal
+/// rows always keep that order. With no column chosen, the pods that need attention lead.
+fn sort_rows(rows: &mut [Arc<PodRow>], sort: Option<(usize, SortOrder)>) {
+    let Some((col_ix, order)) = sort else {
+        rows.sort_by_cached_key(|row| urgency(row));
+        return;
+    };
+    let by = |ordering: Ordering| match order {
+        SortOrder::Ascending => ordering,
+        SortOrder::Descending => ordering.reverse(),
+    };
+    match col_ix {
+        NAME => rows.sort_by(|a, b| by(a.name.cmp(&b.name))),
+        NAMESPACE => rows.sort_by(|a, b| by(a.namespace.cmp(&b.namespace))),
+        STATUS => {
+            rows.sort_by(|a, b| by(urgency(a).cmp(&urgency(b)).then(a.status.cmp(&b.status))))
+        }
+        NODE => rows.sort_by(|a, b| by(a.node.cmp(&b.node))),
+        READY => rows.sort_by(|a, b| by(ready_counts(&a.ready).cmp(&ready_counts(&b.ready)))),
+        RESTARTS => rows.sort_by(|a, b| by(a.restarts.cmp(&b.restarts))),
+        AGE => rows.sort_by(|a, b| by(b.created_unix.cmp(&a.created_unix))),
+        _ => {}
+    }
+}
+
+/// Where the list should scroll so `key` stays where it was on screen, after it moved
+/// `from` one row `to` another. The top of the list stays put, so new rows there show.
+fn anchored_offset(offset: Pixels, from: usize, to: usize) -> Pixels {
+    if offset >= px(0.) {
+        return offset;
+    }
+    offset - ROW_HEIGHT * (to as f32 - from as f32)
+}
+
+/// Shows `snapshot` while the row at the top of the view stays where the reader left it.
+pub fn show_in_place(
+    table: &mut TableState<PodTable>,
+    snapshot: Arc<PodSnapshot>,
+    cx: &mut Context<TableState<PodTable>>,
+) {
+    let handle = table.vertical_scroll_handle.0.borrow().base_handle.clone();
+    let offset = handle.offset();
+    let top = (-offset.y / ROW_HEIGHT).max(0.) as usize;
+    let top_key = table.delegate().row_key(top);
+    table.delegate_mut().show(snapshot);
+    let moved_to = top_key.and_then(|(namespace, name)| {
+        let rows = &table.delegate().rows;
+        rows.iter()
+            .position(|row| row.namespace == namespace && row.name == name)
+    });
+    if let Some(moved_to) = moved_to {
+        handle.set_offset(point(offset.x, anchored_offset(offset.y, top, moved_to)));
+    }
+    cx.notify();
 }
 
 fn cell_text(row: &PodRow, col_ix: usize, now_unix: i64) -> SharedString {
@@ -140,13 +283,13 @@ pub fn format_count(count: usize) -> String {
     grouped
 }
 
-fn unix_now() -> i64 {
+pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-fn format_age(seconds: i64) -> String {
+pub fn format_age(seconds: i64) -> String {
     match seconds.max(0) {
         seconds @ ..60 => format!("{seconds}s"),
         seconds @ ..3_600 => format!("{}m", seconds / 60),
@@ -175,6 +318,61 @@ impl TableDelegate for PodTable {
             NAMESPACE | STATUS | NODE => column,
             _ => column.text_right(),
         }
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let (name, _) = COLUMNS[col_ix];
+        let order = self
+            .sort
+            .filter(|(sorted, _)| *sorted == col_ix)
+            .map(|(_, order)| order);
+        h_flex()
+            .id(("sort", col_ix))
+            .test_support()
+            .role(Role::Button)
+            .aria_label(format!("Sort by {name}"))
+            .size_full()
+            .gap_1()
+            .items_center()
+            .when(!matches!(col_ix, NAME | NAMESPACE | STATUS | NODE), |th| {
+                th.justify_end()
+            })
+            .child(name)
+            .when_some(order, |th, order| {
+                th.child(
+                    Icon::new(match order {
+                        SortOrder::Ascending => IconName::ArrowUp,
+                        SortOrder::Descending => IconName::ArrowDown,
+                    })
+                    .size_3(),
+                )
+            })
+            .on_click(cx.listener(move |table, _, _, cx| {
+                table.delegate_mut().cycle_sort(col_ix);
+                cx.notify();
+            }))
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let selected = self.selected_row == Some(row_ix);
+        div()
+            .id(("row", row_ix))
+            .when(selected, |row| row.bg(cx.theme().sidebar_accent))
+            .on_click(cx.listener(move |table, _, _, cx| {
+                table.delegate_mut().select_row(row_ix);
+                cx.emit(TableEvent::SelectRow(row_ix));
+                cx.notify();
+            }))
     }
 
     fn render_td(
@@ -209,7 +407,178 @@ impl TableDelegate for PodTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tone, format_age, format_count, status_tone};
+    use std::sync::Arc;
+
+    use gpui_kit::px;
+    use taffrail_core::{PodRow, PodSnapshot};
+
+    use super::{
+        AGE, PodTable, READY, RESTARTS, ROW_HEIGHT, STATUS, SortOrder, Tone, anchored_offset,
+        format_age, format_count, sort_rows, status_tone,
+    };
+
+    fn row(name: &str, status: &str, ready: &str, restarts: i32, created: i64) -> Arc<PodRow> {
+        Arc::new(PodRow {
+            namespace: "shop".into(),
+            name: name.into(),
+            status: status.into(),
+            ready: ready.into(),
+            restarts,
+            node: "node-1".into(),
+            created_unix: Some(created),
+            containers: vec!["app".into()],
+        })
+    }
+
+    fn rows() -> Vec<Arc<PodRow>> {
+        vec![
+            row("a", "Running", "1/1", 0, 300),
+            row("b", "CrashLoopBackOff", "0/1", 7, 100),
+            row("c", "Pending", "0/2", 2, 200),
+            row("d", "Completed", "2/2", 0, 400),
+        ]
+    }
+
+    fn sorted(sort: Option<(usize, SortOrder)>) -> Vec<String> {
+        let mut rows = rows();
+        sort_rows(&mut rows, sort);
+        rows.iter().map(|row| row.name.clone()).collect()
+    }
+
+    fn table(rows: Vec<Arc<PodRow>>) -> PodTable {
+        let mut table = PodTable::default();
+        table.show(Arc::new(PodSnapshot {
+            rows,
+            synced: true,
+            error: None,
+        }));
+        table
+    }
+
+    #[test]
+    fn pods_that_need_attention_lead_by_default() {
+        assert_eq!(sorted(None), ["b", "c", "a", "d"]);
+    }
+
+    #[test]
+    fn numeric_columns_sort_as_numbers() {
+        let mut rows = vec![
+            row("a", "Running", "9/10", 10, 0),
+            row("b", "Running", "10/10", 9, 0),
+        ];
+        sort_rows(&mut rows, Some((READY, SortOrder::Ascending)));
+        assert_eq!(rows[0].name, "a");
+        sort_rows(&mut rows, Some((RESTARTS, SortOrder::Ascending)));
+        assert_eq!(rows[0].name, "b");
+    }
+
+    #[test]
+    fn age_sorts_youngest_first_when_ascending() {
+        assert_eq!(
+            sorted(Some((AGE, SortOrder::Ascending))),
+            ["d", "a", "c", "b"]
+        );
+        assert_eq!(
+            sorted(Some((AGE, SortOrder::Descending))),
+            ["b", "c", "a", "d"]
+        );
+    }
+
+    #[test]
+    fn descending_keeps_equal_rows_in_name_order() {
+        let mut rows = vec![
+            row("a", "Running", "1/1", 0, 0),
+            row("b", "Running", "1/1", 0, 0),
+        ];
+        sort_rows(&mut rows, Some((STATUS, SortOrder::Descending)));
+        assert_eq!(rows[0].name, "a");
+    }
+
+    #[test]
+    fn clicking_a_header_cycles_up_down_and_back_to_the_default() {
+        let mut table = table(rows());
+        table.cycle_sort(AGE);
+        assert_eq!(table.sort, Some((AGE, SortOrder::Ascending)));
+        table.cycle_sort(AGE);
+        assert_eq!(table.sort, Some((AGE, SortOrder::Descending)));
+        table.cycle_sort(AGE);
+        assert_eq!(table.sort, None);
+    }
+
+    #[test]
+    fn a_new_sort_column_starts_ascending() {
+        let mut table = table(rows());
+        table.cycle_sort(AGE);
+        table.cycle_sort(AGE);
+        table.cycle_sort(READY);
+        assert_eq!(table.sort, Some((READY, SortOrder::Ascending)));
+    }
+
+    #[test]
+    fn a_tail_follows_the_rows_as_shown() {
+        let targets = table(rows()).log_targets();
+        let pods: Vec<_> = targets.iter().map(|target| target.pod.as_str()).collect();
+        assert_eq!(pods, ["b", "c", "a", "d"]);
+    }
+
+    #[test]
+    fn selection_follows_a_pod_when_its_row_moves() {
+        let mut table = table(rows());
+        table.select_row(2);
+        assert_eq!(table.selected().unwrap().1, "a");
+
+        table.show(Arc::new(PodSnapshot {
+            rows: vec![
+                row("a", "CrashLoopBackOff", "0/1", 1, 300),
+                row("b", "CrashLoopBackOff", "0/1", 7, 100),
+            ],
+            synced: true,
+            error: None,
+        }));
+
+        assert_eq!(table.selected_row, Some(0));
+        assert_eq!(table.selected().unwrap().1, "a");
+    }
+
+    #[test]
+    fn selection_survives_a_filter_that_hides_the_pod() {
+        let mut table = table(rows());
+        table.select_row(0);
+        table.set_filter("zzz".into());
+        assert_eq!(table.selected_row, None);
+        assert_eq!(table.selected().unwrap().1, "b");
+
+        table.set_filter(String::new());
+        assert_eq!(table.selected_row, Some(0));
+    }
+
+    #[test]
+    fn moving_the_selection_stops_at_both_ends() {
+        let mut table = table(rows());
+        assert_eq!(table.move_selection(1), Some(0));
+        assert_eq!(table.move_selection(-1), Some(0));
+        assert_eq!(table.move_selection(10), Some(3));
+        assert_eq!(table.move_selection(1), Some(3));
+    }
+
+    #[test]
+    fn moving_the_selection_in_an_empty_table_does_nothing() {
+        assert_eq!(table(vec![]).move_selection(1), None);
+    }
+
+    #[test]
+    fn the_view_follows_a_row_that_moved_above_it() {
+        assert_eq!(
+            anchored_offset(px(-300.), 10, 12),
+            px(-300.) - ROW_HEIGHT * 2.
+        );
+        assert_eq!(anchored_offset(px(-300.), 10, 9), px(-300.) + ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_top_of_the_list_stays_put_so_new_rows_show() {
+        assert_eq!(anchored_offset(px(0.), 0, 5), px(0.));
+    }
 
     #[test]
     fn counts_group_thousands() {

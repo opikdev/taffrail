@@ -15,7 +15,7 @@ use crate::logs::{LogTarget, MAX_TAIL_PODS};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 
-type PodKey = (String, String);
+pub type PodKey = (String, String);
 type PodRows = BTreeMap<PodKey, Arc<PodRow>>;
 
 /// The fields of a pod that the table shows, so full objects need not stay in memory.
@@ -32,7 +32,8 @@ pub struct PodRow {
 }
 
 impl PodRow {
-    fn key(&self) -> PodKey {
+    /// What identifies this pod across updates, as its row moves or changes.
+    pub fn key(&self) -> PodKey {
         (self.namespace.clone(), self.name.clone())
     }
 
@@ -124,21 +125,31 @@ struct PodState {
 }
 
 impl PodSnapshot {
-    /// Log targets for the first `MAX_TAIL_PODS` pods matching `filter`.
-    pub fn log_targets(&self, filter: &str) -> Vec<LogTarget> {
+    /// The row for `key`, if the pod still exists.
+    pub fn find(&self, key: &PodKey) -> Option<&Arc<PodRow>> {
+        let (namespace, name) = key;
         self.rows
-            .iter()
-            .filter(|row| row.matches(filter))
-            .take(MAX_TAIL_PODS)
-            .flat_map(|row| {
-                row.containers.iter().map(|container| LogTarget {
-                    namespace: row.namespace.clone(),
-                    pod: row.name.clone(),
-                    container: container.clone(),
-                })
+            .binary_search_by(|row| {
+                (row.namespace.as_str(), row.name.as_str())
+                    .cmp(&(namespace.as_str(), name.as_str()))
             })
-            .collect()
+            .ok()
+            .map(|ix| &self.rows[ix])
     }
+}
+
+/// Log targets for the first `MAX_TAIL_PODS` of `rows`.
+pub fn log_targets<'a>(rows: impl IntoIterator<Item = &'a Arc<PodRow>>) -> Vec<LogTarget> {
+    rows.into_iter()
+        .take(MAX_TAIL_PODS)
+        .flat_map(|row| {
+            row.containers.iter().map(|container| LogTarget {
+                namespace: row.namespace.clone(),
+                pod: row.name.clone(),
+                container: container.clone(),
+            })
+        })
+        .collect()
 }
 
 impl PodState {
@@ -364,19 +375,28 @@ mod tests {
     }
 
     #[test]
-    fn log_targets_cover_every_container_of_matching_pods() {
-        let state = listed(vec![
+    fn log_targets_cover_every_container_in_the_order_given() {
+        let snapshot = listed(vec![
             pod_with_containers("api", &["app", "proxy"]),
             pod_with_containers("web", &["app"]),
-        ]);
+        ])
+        .snapshot();
 
-        let targets = state.snapshot().log_targets("api");
+        let targets = log_targets(snapshot.rows.iter().rev());
 
         let names: Vec<_> = targets
             .iter()
             .map(|t| (t.pod.as_str(), t.container.as_str()))
             .collect();
-        assert_eq!(names, [("api", "app"), ("api", "proxy")]);
+        assert_eq!(names, [("web", "app"), ("api", "app"), ("api", "proxy")]);
+    }
+
+    #[test]
+    fn find_locates_a_pod_by_namespace_and_name() {
+        let snapshot = listed(vec![pod("b", "api"), pod("a", "web"), pod("a", "api")]).snapshot();
+        let key = ("a".to_owned(), "web".to_owned());
+        assert_eq!(snapshot.find(&key).unwrap().name, "web");
+        assert!(snapshot.find(&("c".to_owned(), "api".to_owned())).is_none());
     }
 
     #[test]
@@ -385,7 +405,7 @@ mod tests {
             .map(|index| pod_with_containers(&format!("pod-{index:03}"), &["app"]))
             .collect();
 
-        let targets = listed(pods).snapshot().log_targets("");
+        let targets = log_targets(&listed(pods).snapshot().rows);
 
         assert_eq!(targets.len(), MAX_TAIL_PODS);
     }
