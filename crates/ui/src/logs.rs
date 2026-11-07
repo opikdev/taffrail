@@ -1,16 +1,26 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::Sizable;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{LogLine, LogProgress, LogReader, LogTail};
 
-const LINE_HEIGHT: f32 = 18.;
-const SOURCE_WIDTH: f32 = 220.;
+use crate::pods::format_count;
+
+const LINE_HEIGHT: f32 = 20.;
+const BAR_HEIGHT: f32 = 40.;
+const TIME_WIDTH: f32 = 60.;
+const SOURCE_WIDTH: f32 = 210.;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const DOCK_SHARE: f32 = 0.42;
+const MINIMUM_DOCK_HEIGHT: f32 = 160.;
+
+/// How tall the log dock is in a window of this height.
+pub fn dock_height(window_height: Pixels) -> Pixels {
+    (window_height * DOCK_SHARE).max(px(MINIMUM_DOCK_HEIGHT))
+}
 
 /// The newest lines, or a position held still while the user reads.
 ///
@@ -81,26 +91,58 @@ impl LogPane {
 
     fn render_line(&self, line: LogLine, cx: &App) -> impl IntoElement {
         let source = self.source_label(&line);
-        div()
+        let muted = cx.theme().muted_foreground;
+        let (time, text) = split_time(&line.text);
+        let time = time.unwrap_or_default().to_owned();
+        let text = text.to_owned();
+        h_flex()
             .id(("log-line", line.seq))
             .test_support()
             .aria_label(format!("{source} {}", line.text))
             .h(px(LINE_HEIGHT))
-            .flex()
-            .gap_2()
+            .gap_3()
             .flex_shrink_0()
             .whitespace_nowrap()
             .overflow_hidden()
             .child(
                 div()
+                    .w(px(TIME_WIDTH))
+                    .flex_shrink_0()
+                    .text_color(muted)
+                    .child(time),
+            )
+            .child(
+                div()
                     .w(px(SOURCE_WIDTH))
                     .flex_shrink_0()
                     .overflow_hidden()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(muted)
                     .child(source),
             )
-            .child(div().child(line.text))
+            .child(div().child(text))
     }
+}
+
+/// Splits the leading Kubernetes timestamp into its `HH:MM:SS`, if there is one.
+fn split_time(text: &str) -> (Option<&str>, &str) {
+    let Some((stamp, rest)) = text.split_once(' ') else {
+        return (None, text);
+    };
+    match (stamp.as_bytes().get(10), stamp.get(11..19)) {
+        (Some(b'T'), Some(time)) => (Some(time), rest),
+        _ => (None, text),
+    }
+}
+
+fn line_summary(containers: usize, lines: u64) -> String {
+    let containers = match containers {
+        1 => "1 container".to_owned(),
+        containers => format!("{containers} containers"),
+    };
+    format!(
+        "Tailing {containers}, {} lines kept",
+        format_count(lines as usize)
+    )
 }
 
 fn last_top(held: &Range<u64>, rows: u64) -> u64 {
@@ -114,7 +156,8 @@ fn scrolled_top(top: u64, lines: i64, held: Range<u64>, rows: u64) -> u64 {
 
 impl Render for LogPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = (window.viewport_size().height / 2. / px(LINE_HEIGHT)) as u64;
+        let lines_height = dock_height(window.viewport_size().height) - px(BAR_HEIGHT);
+        let rows = (lines_height / px(LINE_HEIGHT)) as u64;
         let held = self.held();
         self.top = if self.following {
             last_top(&held, rows)
@@ -127,39 +170,40 @@ impl Render for LogPane {
             .err()
             .map(|error| format!("Failed to read log lines: {error}"))
             .or_else(|| self.progress.error.clone());
-        let summary = error.unwrap_or_else(|| {
-            format!(
-                "{} streams, {} lines kept",
-                self.reader.targets().len(),
-                held.end - held.start
-            )
-        });
+        let summary = error
+            .unwrap_or_else(|| line_summary(self.reader.targets().len(), held.end - held.start));
         let following = self.following;
-        div()
+        v_flex()
             .id("logs")
             .size_full()
-            .flex()
-            .flex_col()
-            .gap_1()
             .child(
-                div()
-                    .flex()
+                h_flex()
+                    .h(px(BAR_HEIGHT))
+                    .flex_shrink_0()
+                    .px_3()
                     .gap_2()
                     .items_center()
-                    .child(
-                        Button::new("log-mode")
-                            .small()
-                            .label(if following { "Pause" } else { "Follow" })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_following(!following, cx);
-                            })),
-                    )
+                    .text_sm()
+                    .child(div().font_medium().child("Logs"))
                     .child(
                         div()
                             .id("log-summary")
                             .test_support()
                             .aria_label(summary.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
                             .child(summary),
+                    )
+                    .child(
+                        Button::new("log-mode")
+                            .small()
+                            .ghost()
+                            .label(if following { "Pause" } else { "Follow" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_following(!following, cx);
+                            })),
                     ),
             )
             .child(
@@ -167,11 +211,12 @@ impl Render for LogPane {
                     .id("log-lines")
                     .flex_1()
                     .min_h_0()
+                    .px_3()
                     .flex()
                     .flex_col()
                     .when(following, |lines| lines.justify_end())
                     .overflow_hidden()
-                    .text_xs()
+                    .text_size(cx.theme().mono_font_size)
                     .font_family(cx.theme().mono_font_family.clone())
                     .on_scroll(cx.listener(move |this, event, _, cx| {
                         this.scroll(event, rows, cx);
@@ -188,7 +233,31 @@ impl Render for LogPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_top, scrolled_top};
+    use super::{last_top, line_summary, scrolled_top, split_time};
+
+    #[test]
+    fn splits_the_time_from_a_kubernetes_timestamp() {
+        assert_eq!(
+            split_time("2026-11-07T10:42:06.118Z starting up"),
+            (Some("10:42:06"), "starting up")
+        );
+    }
+
+    #[test]
+    fn keeps_lines_without_a_timestamp_whole() {
+        assert_eq!(split_time("plain text"), (None, "plain text"));
+        assert_eq!(split_time("no-spaces"), (None, "no-spaces"));
+        assert_eq!(split_time("2026-11-07Tést x"), (None, "2026-11-07Tést x"));
+    }
+
+    #[test]
+    fn summary_counts_containers_and_lines() {
+        assert_eq!(line_summary(1, 5), "Tailing 1 container, 5 lines kept");
+        assert_eq!(
+            line_summary(50, 604_780),
+            "Tailing 50 containers, 604,780 lines kept"
+        );
+    }
 
     #[test]
     fn last_top_shows_the_newest_lines() {

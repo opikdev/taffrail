@@ -8,33 +8,35 @@ The signature element is the log timeline, a strip above the log lines that show
 
 ```text
 +------------------------------------------------------------------+
-| Context v   Namespace v              Search or run a command  ⌘K |  Title bar
-+----------+--------------------------------------+----------------+
-| Workloads| Filter pods                  Columns | api-7f9c-x2k   |
-|  Pods    +--------------------------------------+ Summary        |
-|  Deploys | Name       Status     Ready  Age     | Events         |  Sidebar,
-| Network  | api-7f9c   Running    1/1    2h      | YAML           |  content,
-| Config   | web-58d1   CrashLoop  0/1    4m      |                |  details
-| Cluster  |                                      |                |
-+----------+--------------------------------------+----------------+
-| Logs  Following 12 pods   Filter lines      Errors only    Pause |
-| ▁▁▂▁▁▁▂▁▁▁▁▂▃█▇▂▁▁▁▂▁  timeline                                  |  Log dock
-| 10:42:07  api-7f9c  ERROR  connection refused                    |
-+------------------------------------------------------------------+
-| Connected · 5,500 pods · 10,214 lines/s · 412 MB of 1 GiB kept   |  Status bar
-+------------------------------------------------------------------+
+| ● ● ●  ◧  [D] dev v                                              |  Title bar
++-----------+------------------------------------------------------+
+| Workloads | Workloads / Pods          Filter pods   Tail 12 pods |
+|  Pods 412 +------------------------------------+-----------------+
+|  Deploys  | Name         Status       Ready  Age | api-7f9c-x2k  |  Sidebar,
+|           | api-7f9c     ● Running    1/1    2h  | Summary       |  panel,
+| Network   | web-58d1     ● CrashLoop  0/1    4m  | Events        |  details
+| Config    |                                      | YAML          |
+| Cluster   +------------------------------------+-----------------+
+|           | Logs  Tailing 12 containers           Filter   Pause |
+|           | ▁▁▂▁▁▁▂▁▁▁▁▂▃█▇▂▁▁▁▂▁  timeline                      |  Log dock
+| ● v1.35.0 | 10:42:07  api-7f9c  ERROR  connection refused        |
++-----------+------------------------------------------------------+
 ```
 
-- The sidebar lists resources by group, and collapses to icons with labels on hover.
+- The title bar and sidebar sit on the window canvas. Everything you work in sits in one raised panel with a hairline border, inset from the window edge.
+- The title bar holds the context picker, with a brass badge showing the context's first letter.
+- The sidebar lists resources by group, with a neutral pill on the current one, and collapses to an icon rail. Resources that don't exist yet stay disabled.
+- The sidebar footer shows the connection. Anything that needs explaining appears in the panel, where there is room for a next step.
 - The details panel opens when you select a row, and closes with `Esc`.
 - The log dock stays open while you move between views. It can be resized or maximized.
 - Each window shows one context. Use **New window** to compare clusters.
 
 ## Resource tables
 
+- Rows have no dividers or stripes. Hover and selection separate them.
 - Rows are virtual, sort by any column, and update in place without moving the selection.
 - A row keeps its position under the pointer while live updates arrive, and new rows appear in sort order.
-- Status shows a word and a colour, never colour alone.
+- Status shows a dot and a word in a colour, never colour alone.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
 ## Details panel
@@ -78,40 +80,46 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | State | What the user sees |
 |---|---|
 | No kubeconfig | **No clusters found.** Taffrail reads `~/.kube/config` and `KUBECONFIG`. Add a cluster with your provider's CLI, then press **Reload contexts**. |
-| Connecting | The context name with progress in the status bar. The last view stays visible. |
+| Connecting | **Connecting to staging.** The sidebar footer shows **Connecting**. |
+| Can't connect | **Can't reach staging**, with the error and **Try again**. |
 | Login needed | **Waiting for login to staging.** Finish signing in in your browser or terminal. |
 | Connection lost | **Reconnecting to staging.** Tables show their last data, marked with the time it was last updated. |
 | No permission | **You can't list Secrets in this namespace.** The rest of the app keeps working. |
 | No rows | **No pods in `payments`.** Offer **Show all namespaces**. |
 | No matches | **No pods match "web".** Offer **Clear filter**. |
-| Logs not started | **Choose pods to follow.** Offer **Tail selected pods**. |
-| Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the status bar. |
+| Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |
+| Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the log dock. |
 | Secret hidden | `••••••••` with **Reveal value**. Values hide again when you leave the object. |
 
 ## Words
 
 - Use one term per concept: **context**, not cluster profile; **tail**, not stream; **filter** hides lines, and **search** only highlights them.
-- Buttons name the action: **Tail selected pods**, **Reveal value**, **Reload contexts**.
+- Buttons name the action: **Tail 12 pods**, **Reveal value**, **Reload contexts**.
 - Errors say what happened, why if known, and what to do next.
 
 ## Colour
 
-Light and dark themes follow the system, and both are set through the GPUI Kit theme. Text sizes come from the theme, and spacing uses a 4 px scale.
+The chrome is monochrome, so colour always means something. Brass marks focus and the context badge, and status colours mark state.
+
+Light and dark themes follow the system. Both live in `crates/ui/themes/taffrail.json`, which maps these tokens onto the GPUI Kit theme. Spacing uses a 4 px scale, and text sizes come from the theme.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
-| `surface` | `#14181D` | `#F7F6F3` | Window background |
-| `raised` | `#1C2229` | `#FFFFFF` | Panels and menus |
-| `selected` | `#2A3038` | `#EBE7DE` | Selected rows |
-| `text` | `#E6E9ED` | `#1C2127` | Primary text |
-| `muted` | `#9AA5B1` | `#56606B` | Secondary text |
-| `accent` | `#E0AE4B` | `#7A5200` | Focus, active items |
+| `canvas` | `#101113` | `#EFEEEA` | Window, title bar, sidebar |
+| `panel` | `#17181A` | `#FBFAF8` | The content panel |
+| `raised` | `#1E1F22` | `#FFFFFF` | Menus and popovers |
+| `hover` | `#232427` | `#F1EFEA` | Hovered rows |
+| `selected` | `#2A2B2F` | `#E7E4DC` | Selected rows and the current sidebar item |
+| `line` | `#26272A` | `#E2DFD8` | Hairline borders |
+| `text` | `#E9E9E7` | `#1B1C1E` | Primary text |
+| `muted` | `#9C9DA1` | `#5C5D61` | Secondary text |
+| `accent` | `#E0AE4B` | `#7A5200` | Focus, context badge |
 | `error` | `#F4837D` | `#B3261E` | Failed states |
 | `warning` | `#F0975A` | `#964A00` | Degraded states |
 | `success` | `#6CC07A` | `#1E7038` | Healthy states |
 | `info` | `#7DB7E8` | `#1F5F99` | Neutral notices |
 
-Every foreground colour measures at least 4.5:1 against `surface`, `raised` and `selected`.
+A test checks that every text colour measures at least 4.5:1 on every surface, in both themes.
 
 ## Accessibility
 
