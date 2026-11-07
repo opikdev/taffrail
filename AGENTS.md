@@ -1,6 +1,6 @@
 # Agent guide
 
-AI agents do the development here. Read this first, then [docs/roadmap.md](docs/roadmap.md).
+AI agents do the development here. Read this first, then [the roadmap](docs/roadmap.md) and [the UI design](docs/design.md).
 
 ## Hard rules
 
