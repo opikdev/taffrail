@@ -145,6 +145,7 @@ pub struct Root {
     _table_events: Subscription,
     _details_events: Option<Subscription>,
     _appearance: Subscription,
+    _bounds: Subscription,
 }
 
 impl Root {
@@ -196,6 +197,9 @@ impl Root {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.remember_state(window, cx);
+        });
         let mut root = Self {
             backend,
             contexts: None,
@@ -218,6 +222,7 @@ impl Root {
             _table_events: table_events,
             _details_events: None,
             _appearance: appearance,
+            _bounds: bounds,
         };
         root.load_contexts(contexts, window, cx);
         root
@@ -261,6 +266,7 @@ impl Root {
                     return;
                 };
                 this.connect(context.clone(), window, cx);
+                this.remember_state(window, cx);
             },
         ));
         self.picker = Some(picker);
@@ -281,6 +287,10 @@ impl Root {
             .cloned()
             .or_else(|| self.saved_context.clone());
         windows::capture(context, self.sidebar_collapsed, window, cx)
+    }
+
+    fn remember_state(&self, window: &Window, cx: &mut App) {
+        windows::remember(self.saved_state(window, cx), cx);
     }
 
     fn connect(&mut self, context: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -648,8 +658,9 @@ impl Root {
                             }))
                             .accessibility_label(toggle_label)
                             .tooltip(toggle_label)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.sidebar_collapsed = !this.sidebar_collapsed;
+                                this.remember_state(window, cx);
                                 cx.notify();
                             })),
                     )
