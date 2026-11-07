@@ -27,6 +27,7 @@ const COLUMNS: [(&str, f32); 7] = [
     ("Restarts", 80.),
     ("Age", 60.),
 ];
+pub const ALWAYS_SHOWN_COLUMN: &str = COLUMNS[NAME].0;
 const STATUS_DOT: f32 = 6.;
 pub const ALL_NAMESPACES: &str = "All namespaces";
 const CELL_PADDING: Edges<Pixels> = Edges {
@@ -90,6 +91,7 @@ pub struct PodTable {
     snapshot: Arc<PodSnapshot>,
     filter: String,
     namespace: Option<String>,
+    hidden: [bool; COLUMNS.len()],
     sort: Option<(usize, SortOrder)>,
     rows: Vec<Arc<PodRow>>,
     selected: Option<PodKey>,
@@ -150,6 +152,38 @@ impl PodTable {
             .iter()
             .any(|row| row.namespace == namespace);
         (!has_pods).then_some(namespace)
+    }
+
+    pub fn hidden_columns(&self) -> Vec<&'static str> {
+        column_names()
+            .zip(self.hidden)
+            .filter_map(|(name, hidden)| hidden.then_some(name))
+            .collect()
+    }
+
+    /// Hides the columns with these names and shows the rest. Hiding the sorted column
+    /// returns to the default order.
+    pub fn set_hidden_columns(&mut self, names: impl IntoIterator<Item = impl AsRef<str>>) {
+        self.hidden = Default::default();
+        for name in names {
+            let name = name.as_ref();
+            let column = column_names().position(|column| column == name);
+            if let Some(col_ix) = column.filter(|col_ix| *col_ix != NAME) {
+                self.hidden[col_ix] = true;
+            }
+        }
+        if self.sort.is_some_and(|(sorted, _)| self.hidden[sorted]) {
+            self.sort = None;
+            self.rebuild();
+        }
+    }
+
+    /// The `COLUMNS` index shown at a table position, which hidden columns shift.
+    fn column_at(&self, position: usize) -> usize {
+        (0..COLUMNS.len())
+            .filter(|col_ix| !self.hidden[*col_ix])
+            .nth(position)
+            .unwrap_or(NAME)
     }
 
     /// What a tail would follow: the rows as shown, so the pods on top come first.
@@ -227,6 +261,10 @@ impl PodTable {
         };
         cell_text(row, col_ix, unix_now())
     }
+}
+
+pub fn column_names() -> impl Iterator<Item = &'static str> {
+    COLUMNS.iter().map(|(name, _)| *name)
 }
 
 /// Each namespace once. Snapshot rows arrive sorted by namespace, so this needs no set.
@@ -348,14 +386,15 @@ pub fn format_age(seconds: i64) -> String {
 
 impl TableDelegate for PodTable {
     fn columns_count(&self, _: &App) -> usize {
-        COLUMNS.len()
+        self.hidden.iter().filter(|hidden| !**hidden).count()
     }
 
     fn rows_count(&self, _: &App) -> usize {
         self.rows.len()
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, position: usize, _: &App) -> Column {
+        let col_ix = self.column_at(position);
         let (name, width) = COLUMNS[col_ix];
         let column = Column::new(name, name).width(px(width));
         match col_ix {
@@ -370,10 +409,11 @@ impl TableDelegate for PodTable {
 
     fn render_th(
         &mut self,
-        col_ix: usize,
+        position: usize,
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let col_ix = self.column_at(position);
         let (name, _) = COLUMNS[col_ix];
         let order = self
             .sort
@@ -426,10 +466,11 @@ impl TableDelegate for PodTable {
     fn render_td(
         &mut self,
         row_ix: usize,
-        col_ix: usize,
+        position: usize,
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let col_ix = self.column_at(position);
         let text = self.cell(row_ix, col_ix);
         let muted = cx.theme().muted_foreground;
         match col_ix {
@@ -448,8 +489,8 @@ impl TableDelegate for PodTable {
         }
     }
 
-    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
-        Some(self.cell(row_ix, col_ix))
+    fn cell_label(&self, row_ix: usize, position: usize, _: &App) -> Option<SharedString> {
+        Some(self.cell(row_ix, self.column_at(position)))
     }
 }
 
@@ -461,8 +502,8 @@ mod tests {
     use taffrail_core::{PodRow, PodSnapshot};
 
     use super::{
-        AGE, ALL_NAMESPACES, PodTable, READY, RESTARTS, ROW_HEIGHT, STATUS, SortOrder, Tone,
-        anchored_offset, format_age, format_count, sort_rows, status_tone,
+        AGE, ALL_NAMESPACES, NAME, NODE, PodTable, READY, RESTARTS, ROW_HEIGHT, STATUS, SortOrder,
+        Tone, anchored_offset, format_age, format_count, sort_rows, status_tone,
     };
 
     fn row(name: &str, status: &str, ready: &str, restarts: i32, created: i64) -> Arc<PodRow> {
@@ -696,6 +737,64 @@ mod tests {
 
         table.set_namespace(None);
         assert_eq!(table.selected_row, Some(3));
+    }
+
+    #[test]
+    fn positions_skip_hidden_columns() {
+        let mut table = table(rows());
+        table.set_hidden_columns(["Namespace", "Ready"]);
+        let shown: Vec<_> = (0..5).map(|position| table.column_at(position)).collect();
+        assert_eq!(shown, [NAME, STATUS, NODE, RESTARTS, AGE]);
+    }
+
+    #[test]
+    fn hidden_columns_read_back_in_table_order() {
+        let mut table = table(rows());
+        assert!(table.hidden_columns().is_empty());
+        table.set_hidden_columns(vec![String::from("Age"), String::from("Node")]);
+        assert_eq!(table.hidden_columns(), ["Node", "Age"]);
+    }
+
+    #[test]
+    fn setting_hidden_columns_shows_the_others_again() {
+        let mut table = table(rows());
+        table.set_hidden_columns(["Age"]);
+        table.set_hidden_columns(["Node"]);
+        assert_eq!(table.hidden_columns(), ["Node"]);
+    }
+
+    #[test]
+    fn the_name_column_cannot_be_hidden() {
+        let mut table = table(rows());
+        table.set_hidden_columns(["Name"]);
+        assert!(table.hidden_columns().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_column_is_ignored() {
+        let mut table = table(rows());
+        table.set_hidden_columns(["Cost"]);
+        assert!(table.hidden_columns().is_empty());
+    }
+
+    #[test]
+    fn hiding_the_sorted_column_returns_to_the_default_order() {
+        let mut table = table(rows());
+        table.cycle_sort(AGE);
+        assert_eq!(pod_names(&table), ["d", "a", "c", "b"]);
+
+        table.set_hidden_columns(["Age"]);
+
+        assert_eq!(table.sort, None);
+        assert_eq!(pod_names(&table), ["b", "c", "a", "d"]);
+    }
+
+    #[test]
+    fn hiding_another_column_keeps_the_sort() {
+        let mut table = table(rows());
+        table.cycle_sort(AGE);
+        table.set_hidden_columns(["Node"]);
+        assert_eq!(table.sort, Some((AGE, SortOrder::Ascending)));
     }
 
     #[test]

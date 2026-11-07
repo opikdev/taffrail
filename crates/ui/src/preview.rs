@@ -14,6 +14,7 @@ use crate::fake_api::{Fixture, kubeconfig, serve};
 use crate::root::Root;
 
 const WINDOW: (f32, f32) = (1360., 860.);
+const NARROW_WINDOW: (f32, f32) = (760., 480.);
 const WAIT_STEP: Duration = Duration::from_millis(20);
 const WAIT_STEPS: usize = 500;
 const SETTLE_FRAMES: usize = 30;
@@ -206,6 +207,14 @@ struct Scene {
 
 impl Scene {
     fn open(contexts: Result<Contexts, ClusterError>, mode: ThemeMode) -> Self {
+        Self::open_at(contexts, mode, WINDOW)
+    }
+
+    fn open_at(
+        contexts: Result<Contexts, ClusterError>,
+        mode: ThemeMode,
+        (width, height): (f32, f32),
+    ) -> Self {
         let platform = gpui_kit::platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
             platform.text_system(),
@@ -223,7 +232,7 @@ impl Scene {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point::default(),
-                size: size(px(WINDOW.0), px(WINDOW.1)),
+                size: size(px(width), px(height)),
             })),
             focus: false,
             show: false,
@@ -299,8 +308,12 @@ impl Scene {
 }
 
 fn connected(server: &str, mode: ThemeMode) -> Scene {
+    connected_at(server, mode, WINDOW)
+}
+
+fn connected_at(server: &str, mode: ThemeMode, window: (f32, f32)) -> Scene {
     let contexts = Contexts::from_yaml(&kubeconfig(server, "dev"));
-    let mut scene = Scene::open(contexts, mode);
+    let mut scene = Scene::open_at(contexts, mode, window);
     scene.wait_until(|window, _| {
         window
             .find("status")
@@ -397,6 +410,36 @@ pub fn run(directory: PathBuf) {
         })
         .expect("preview window closed");
     namespaces.save(&directory, "namespace-menu-dark.png");
+
+    let mut columns = connected(&server, ThemeMode::Dark);
+    let root = columns.root.clone();
+    columns.cx.update(|cx| {
+        root.update(cx, |root, cx| {
+            root.set_hidden_columns(["Namespace", "Node"], cx);
+        })
+    });
+    columns.save(&directory, "columns-hidden-dark.png");
+    let handle = columns.handle;
+    columns
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("columns", cx);
+        })
+        .expect("preview window closed");
+    columns.save(&directory, "columns-menu-dark.png");
+
+    let mut narrow = connected_at(&server, ThemeMode::Dark, NARROW_WINDOW);
+    narrow.save(&directory, "narrow-dark.png");
+    let handle = narrow.handle;
+    narrow
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("columns", cx);
+        })
+        .expect("preview window closed");
+    narrow.save(&directory, "narrow-columns-menu-dark.png");
 
     let mut empty = connected(&server, ThemeMode::Light);
     empty.set_namespace("billing");

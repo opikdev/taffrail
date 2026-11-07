@@ -4,6 +4,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
@@ -18,13 +19,19 @@ use taffrail_core::{
 
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane};
 use crate::logs::{LogPane, dock_height};
-use crate::pods::{ALL_NAMESPACES, PodTable, show_in_place};
+use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
 
 type ContextPicker = SelectState<Vec<String>>;
 type NamespacePicker = SelectState<SearchableVec<String>>;
 
 actions!(taffrail, [NextRow, PreviousRow, CloseDetails]);
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+struct ToggleColumn {
+    name: &'static str,
+}
 
 const KEY_CONTEXT: &str = "Taffrail";
 const TABLE_KEYS: &str = "Taffrail && !Input";
@@ -47,6 +54,8 @@ const CONTEXT_PICKER_CHROME: f32 = 40.;
 const CONTEXT_PICKER_WIDTH: Range<f32> = 96.0..260.0;
 const CONTEXT_BADGE_SIZE: f32 = 20.;
 const FILTER_WIDTH: f32 = 240.;
+const FILTER_MIN_WIDTH: f32 = 96.;
+const COMPACT_HEADER_BELOW: f32 = 920.;
 const NAMESPACE_PICKER_WIDTH: f32 = 148.;
 const NAMESPACE_MENU_WIDTH: f32 = 240.;
 const NOTICE_WIDTH: f32 = 420.;
@@ -464,6 +473,34 @@ impl Root {
         cx.notify();
     }
 
+    pub(crate) fn hidden_columns(&self, cx: &App) -> Vec<&'static str> {
+        self.pods.read(cx).delegate().hidden_columns()
+    }
+
+    pub(crate) fn set_hidden_columns(
+        &mut self,
+        names: impl IntoIterator<Item = impl AsRef<str>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pods.update(cx, |pods, cx| {
+            pods.delegate_mut().set_hidden_columns(names);
+            pods.refresh(cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_column(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        let mut hidden = self.hidden_columns(cx);
+        match hidden.iter().position(|column| *column == name) {
+            Some(ix) => {
+                hidden.remove(ix);
+            }
+            None => hidden.push(name),
+        }
+        self.set_hidden_columns(hidden, cx);
+    }
+
     fn run_notice_action(
         &mut self,
         action: NoticeAction,
@@ -652,7 +689,13 @@ impl Root {
             })
     }
 
-    fn render_panel_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_panel_header(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let compact = window.viewport_size().width < px(COMPACT_HEADER_BELOW);
+        let hidden = self.hidden_columns(cx);
         let table = self.pods.read(cx).delegate();
         let targets = self.log_targets(cx);
         let pods = distinct_pods(&targets);
@@ -667,12 +710,15 @@ impl Root {
             .border_b_1()
             .border_color(cx.theme().border)
             .text_sm()
-            .child(div().text_color(muted).child("Workloads"))
-            .child(div().text_color(muted).child("/"))
+            .when(!compact, |header| {
+                header
+                    .child(div().text_color(muted).child("Workloads"))
+                    .child(div().text_color(muted).child("/"))
+            })
             .child(div().font_medium().child("Pods"))
             .child(div().flex_1())
             .child(
-                div().w(px(NAMESPACE_PICKER_WIDTH)).child(
+                div().w(px(NAMESPACE_PICKER_WIDTH)).flex_shrink_0().child(
                     Select::new(&self.namespace_picker)
                         .id("namespace-picker")
                         .small()
@@ -682,7 +728,7 @@ impl Root {
                 ),
             )
             .child(
-                div().w(px(FILTER_WIDTH)).child(
+                div().w(px(FILTER_WIDTH)).min_w(px(FILTER_MIN_WIDTH)).child(
                     Input::new(&self.filter)
                         .id("pod-filter")
                         .small()
@@ -691,13 +737,34 @@ impl Root {
                 ),
             )
             .child(
-                Button::new("tail-logs")
-                    .small()
-                    .outline()
-                    .icon(Icon::new(IconName::ScrollText))
-                    .label(label)
-                    .disabled(pods == 0 || self.connection.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.tail_logs(cx))),
+                div().flex_shrink_0().child(
+                    Button::new("columns")
+                        .small()
+                        .outline()
+                        .icon(Icon::new(IconName::Columns3))
+                        .accessibility_label("Columns")
+                        .map(|button| {
+                            if compact {
+                                button.tooltip("Columns")
+                            } else {
+                                button.label("Columns")
+                            }
+                        })
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                            columns_menu(menu, &hidden)
+                        }),
+                ),
+            )
+            .child(
+                div().flex_shrink_0().child(
+                    Button::new("tail-logs")
+                        .small()
+                        .outline()
+                        .icon(Icon::new(IconName::ScrollText))
+                        .label(label)
+                        .disabled(pods == 0 || self.connection.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.tail_logs(cx))),
+                ),
             )
     }
 
@@ -736,6 +803,17 @@ impl Root {
                 )
             })
     }
+}
+
+fn columns_menu(menu: PopupMenu, hidden: &[&'static str]) -> PopupMenu {
+    column_names().fold(menu, |menu, name| {
+        menu.menu_with_check_and_disabled(
+            name,
+            !hidden.contains(&name),
+            Box::new(ToggleColumn { name }),
+            name == ALWAYS_SHOWN_COLUMN,
+        )
+    })
 }
 
 fn no_rows_notice(table: &PodTable) -> Notice {
@@ -795,7 +873,7 @@ impl Render for Root {
         let pod_count = table.snapshot().synced.then(|| table.snapshot().rows.len());
         let connection = self.render_connection(cx);
         let title_bar = self.render_title_bar(cx);
-        let header = self.render_panel_header(cx);
+        let header = self.render_panel_header(window, cx);
         let content = match self.notice(cx) {
             Some(notice) => self.render_notice(notice, cx).into_any_element(),
             None => div()
@@ -820,6 +898,9 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseDetails, _, cx| this.close_details(cx)))
+            .on_action(cx.listener(|this, action: &ToggleColumn, _, cx| {
+                this.toggle_column(action.name, cx);
+            }))
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .child(title_bar)
@@ -886,8 +967,12 @@ mod tests {
     use crate::fake_api::{Fixture, kubeconfig, serve};
     use crate::pods::PodTable;
 
+    use gpui_kit::component::table::TableDelegate;
     use gpui_kit::test::{TestAppContextExt, TestQueryExt, TestWindowExt};
-    use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, WindowOptions};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds,
+        WindowOptions, px, size,
+    };
     use taffrail_core::{Backend, Contexts, LogTarget, PodRow, PodSnapshot};
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
@@ -909,8 +994,9 @@ mod tests {
         serve_pods(POD_LIST_BODY)
     }
 
-    fn open_root(
+    fn open_with(
         contexts: Result<Contexts, taffrail_core::ClusterError>,
+        options: WindowOptions,
         cx: &mut TestAppContext,
     ) -> (AnyWindowHandle, Entity<Root>) {
         cx.update(|cx| {
@@ -919,11 +1005,31 @@ mod tests {
         });
         let backend = Arc::new(Backend::new().unwrap());
         cx.update(|cx| {
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| Root::new(backend, contexts, window, cx))
             })
             .unwrap()
         })
+    }
+
+    fn open_root(
+        contexts: Result<Contexts, taffrail_core::ClusterError>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        open_with(contexts, WindowOptions::default(), cx)
+    }
+
+    fn open_sized(
+        contexts: Result<Contexts, taffrail_core::ClusterError>,
+        width: f32,
+        cx: &mut TestAppContext,
+    ) -> AnyWindowHandle {
+        let bounds = Bounds::new(Point::default(), size(px(width), px(600.)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        open_with(contexts, options, cx).0
     }
 
     fn open(
@@ -1340,6 +1446,128 @@ users:
         cx.update_window(handle, |_, window, _| {
             assert!(window.find_all_by_label("front-1").len() == 1);
             assert_eq!(window.find("details-title").label(), Some("api-1"));
+        })
+        .unwrap();
+    }
+
+    fn headers(root: &Entity<Root>, cx: &mut TestAppContext) -> Vec<String> {
+        root.read_with(cx, |root, cx| root.pods.read(cx).headers(cx))
+    }
+
+    fn first_row(root: &Entity<Root>, cx: &mut TestAppContext) -> Vec<String> {
+        root.read_with(cx, |root, cx| {
+            let table = root.pods.read(cx).delegate();
+            (0..table.columns_count(cx))
+                .filter_map(|position| table.cell_label(0, position, cx))
+                .map(|cell| cell.to_string())
+                .collect()
+        })
+    }
+
+    fn open_columns_menu(handle: AnyWindowHandle, cx: &mut TestAppContext) {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("columns", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    fn click_menu_item(handle: AnyWindowHandle, label: &str, cx: &mut TestAppContext) {
+        cx.update_window(handle, |_, window, cx| {
+            let item = window.within("popup-menu").find_by_label(label);
+            let id = item.path().last().unwrap().clone();
+            window.within("popup-menu").click(id, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_columns_menu_hides_and_shows_a_column(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+
+        open_columns_menu(handle, cx);
+        click_menu_item(handle, "Namespace", cx);
+
+        assert_eq!(
+            headers(&root, cx),
+            ["Name", "Status", "Node", "Ready", "Restarts", "Age"]
+        );
+        assert_eq!(first_row(&root, cx)[..3], ["api-1", "Running", "node-1"]);
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find_by_label("Sort by Namespace").is_none());
+            assert!(window.try_find_by_label("Sort by Status").is_some());
+            assert!(window.find_all_by_label("shop").is_empty());
+        })
+        .unwrap();
+
+        open_columns_menu(handle, cx);
+        cx.update_window(handle, |_, window, _| {
+            let item = window.within("popup-menu").find_by_label("Namespace");
+            assert_eq!(item.checked(), Some(false));
+        })
+        .unwrap();
+        click_menu_item(handle, "Namespace", cx);
+
+        assert_eq!(headers(&root, cx).len(), 7);
+        root.read_with(cx, |root, cx| assert!(root.hidden_columns(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    async fn the_columns_menu_keeps_name_shown(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+
+        open_columns_menu(handle, cx);
+        cx.update_window(handle, |_, window, _| {
+            let name = window.within("popup-menu").find_by_label("Name");
+            assert_eq!(name.checked(), Some(true));
+        })
+        .unwrap();
+        click_menu_item(handle, "Name", cx);
+
+        assert_eq!(headers(&root, cx).len(), 7);
+        root.read_with(cx, |root, cx| assert!(root.hidden_columns(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    async fn a_header_sorts_its_own_column_after_another_is_hidden(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+        root.update(cx, |root, cx| root.set_hidden_columns(["Namespace"], cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let header = window.find_by_label("Sort by Name");
+            let id = header.path().last().unwrap().clone();
+            window.click(id.clone(), cx);
+            window.render_frame(cx);
+            window.click(id, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        assert_eq!(first_row(&root, cx)[0], "front-1");
+    }
+
+    #[gpui_kit::test]
+    async fn the_header_fits_at_the_minimum_window_width(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_pods(TWO_NAMESPACES_BODY), "dev"));
+        let handle = open_sized(contexts, 760., cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let picker = window.find("namespace-picker").bounds();
+            let filter = window.find("pod-filter").bounds();
+            let columns = window.find("columns").bounds();
+            let tail = window.find("tail-logs").bounds();
+            assert!(picker.right() <= filter.left());
+            assert!(filter.right() <= columns.left());
+            assert!(columns.right() <= tail.left());
+            assert!(tail.right() <= window.viewport_size().width);
+            assert!(filter.size.width >= px(96.));
+            assert_eq!(window.find("columns").label(), Some("Columns"));
         })
         .unwrap();
     }

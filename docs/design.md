@@ -10,7 +10,7 @@ The signature element is the log timeline, a strip above the log lines that show
 +------------------------------------------------------------------+
 | ● ● ●  ◧  [D] dev v                                              |  Title bar
 +-----------+------------------------------------------------------+
-| Workloads | Pods   All namespaces   Filter pods   Tail 12 pods  |
+| Workloads | Pods  All namespaces  Filter  Columns  Tail 12 pods |
 |  Pods 412 +------------------------------------+-----------------+
 |  Deploys  | Name         Status       Ready  Age | api-7f9c-x2k  |  Sidebar,
 |           | api-7f9c     ● Running    1/1    2h  | Summary       |  panel,
@@ -38,6 +38,8 @@ The signature element is the log timeline, a strip above the log lines that show
 - The namespace picker sits left of the filter and lists the namespaces in the cluster, with a search field. Both narrow the rows on the client, over one watch of all pods, so they narrow what a tail follows too.
 - A chosen namespace stays chosen if it disappears, and the table shows the **No rows** state until it returns.
 - Filters hide rows but keep the selection, so the details panel stays open on a pod the filter hides.
+- **Columns** opens a menu with a check for each column. **Name** always shows. Hiding the sorted column returns to the default order.
+- Below 920 px of window width, the panel header drops **Workloads /**, **Columns** shows only its icon, and the filter narrows, so the header fits the 760 px minimum.
 - Clicking a header sorts by that column, then reverses it, then returns to the default order. Only the sorted column shows an arrow.
 - Rows are virtual, and update in place without moving the selection, because a selection belongs to the pod and not to a position.
 - Once you have scrolled, the row at the top of the view stays there while others move around it. At the very top of the list, new rows appear.
