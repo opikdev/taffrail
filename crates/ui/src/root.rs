@@ -183,6 +183,7 @@ impl Root {
                 };
                 let namespace = (choice != ALL_NAMESPACES).then(|| choice.clone());
                 this.set_namespace(namespace, window, cx);
+                this.remember_state(window, cx);
             },
         );
         let table_events =
@@ -200,6 +201,13 @@ impl Root {
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
             this.remember_state(window, cx);
         });
+        let SavedState {
+            sidebar_collapsed,
+            context: saved_context,
+            namespace,
+            hidden_columns,
+            ..
+        } = saved;
         let mut root = Self {
             backend,
             contexts: None,
@@ -213,8 +221,8 @@ impl Root {
             details: None,
             focus_handle,
             session: Session::ChooseContext,
-            sidebar_collapsed: saved.sidebar_collapsed,
-            saved_context: saved.context,
+            sidebar_collapsed,
+            saved_context,
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
@@ -224,6 +232,8 @@ impl Root {
             _appearance: appearance,
             _bounds: bounds,
         };
+        root.set_hidden_columns(hidden_columns, cx);
+        root.set_namespace(namespace, window, cx);
         root.load_contexts(contexts, window, cx);
         root
     }
@@ -286,7 +296,18 @@ impl Root {
             .and_then(|picker| picker.read(cx).selected_value())
             .cloned()
             .or_else(|| self.saved_context.clone());
-        windows::capture(context, self.sidebar_collapsed, window, cx)
+        let state = SavedState {
+            context,
+            sidebar_collapsed: self.sidebar_collapsed,
+            namespace: self.namespace(cx),
+            hidden_columns: self
+                .hidden_columns(cx)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            ..SavedState::default()
+        };
+        windows::with_placement(state, window, cx)
     }
 
     fn remember_state(&self, window: &Window, cx: &mut App) {
@@ -547,7 +568,10 @@ impl Root {
                     .update(cx, |filter, cx| filter.set_value("", window, cx));
                 self.apply_filter(String::new(), cx);
             }
-            NoticeAction::ShowAllNamespaces => self.set_namespace(None, window, cx),
+            NoticeAction::ShowAllNamespaces => {
+                self.set_namespace(None, window, cx);
+                self.remember_state(window, cx);
+            }
         }
     }
 
@@ -927,8 +951,9 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseDetails, _, cx| this.close_details(cx)))
-            .on_action(cx.listener(|this, action: &ToggleColumn, _, cx| {
+            .on_action(cx.listener(|this, action: &ToggleColumn, window, cx| {
                 this.toggle_column(action.name, cx);
+                this.remember_state(window, cx);
             }))
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
@@ -1350,6 +1375,36 @@ users:
             window.press("j", cx);
             window.render_frame(cx);
             assert_eq!(window.find("details-title").label(), Some("api-1"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn restores_the_saved_namespace_and_hidden_columns(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_pods(TWO_NAMESPACES_BODY), "dev"));
+        init(cx);
+        let saved = SavedState {
+            namespace: Some("web".into()),
+            hidden_columns: vec!["Node".into()],
+            ..SavedState::default()
+        };
+        let backend = Arc::new(Backend::new().unwrap());
+        let (handle, root) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| Root::new(backend, contexts, saved, window, cx))
+            })
+            .unwrap()
+        });
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+            assert!(window.find_all_by_label("api-1").is_empty());
+            let state = root.read(cx).saved_state(window, cx);
+            assert_eq!(state.namespace.as_deref(), Some("web"));
+            assert_eq!(state.hidden_columns, ["Node"]);
         })
         .unwrap();
     }

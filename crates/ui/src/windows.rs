@@ -142,20 +142,14 @@ fn display_uuid(display: &dyn PlatformDisplay) -> Option<String> {
     display.uuid().ok().map(|uuid| uuid.to_string())
 }
 
-/// `window` as it should be restored. A fullscreen window keeps the size it returns to.
-pub fn capture(
-    context: Option<String>,
-    sidebar_collapsed: bool,
-    window: &Window,
-    cx: &App,
-) -> SavedState {
+/// Adds where `window` is to `state`. A fullscreen window keeps the size it returns to.
+pub fn with_placement(state: SavedState, window: &Window, cx: &App) -> SavedState {
     SavedState {
         window: Some(to_rect(window.window_bounds().get_bounds())),
         display: window
             .display(cx)
             .and_then(|display| display_uuid(display.as_ref())),
-        sidebar_collapsed,
-        context,
+        ..state
     }
 }
 
