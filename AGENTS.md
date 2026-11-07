@@ -20,7 +20,7 @@ This boundary limits the cost of leaving GPUI, so keep it strict. `deny.toml` en
 
 ## Work rules
 
-- Claim performance only with a measured number and the command that produced it.
+- Claim performance only with a measured number and the command that produced it. See [Measure performance](docs/how-to/measure-performance.md).
 - Bound log storage and spill to disk. Do not hold unbounded logs in memory.
 - Keep one task per branch and per pull request. Run parallel tasks in separate worktrees.
 - Use `scripts/sim-cluster.sh` for scale tests. Never test against a real cluster unless the user gives you one.
