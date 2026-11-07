@@ -2,7 +2,7 @@
 
 A read-first Kubernetes desktop console built around live logs across many pods. Written in Rust on GPUI. Free, with no account and no telemetry.
 
-**Status:** early development. There are no releases yet, and the app only opens a placeholder window.
+**Status:** early development. There are no releases yet. The app lists your kubeconfig contexts and connects to one.
 
 The name comes from the taffrail log, a ship's instrument trailed off the stern.
 
