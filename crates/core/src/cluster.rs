@@ -6,6 +6,7 @@ use kube::config::{KubeConfigOptions, Kubeconfig, KubeconfigError};
 use kube::{Client, Config};
 use tokio::runtime::{self, Runtime};
 
+use crate::logs::{self, LogTail, LogTarget};
 use crate::pods::{self, PodWatch};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -142,6 +143,16 @@ impl Backend {
     pub fn watch_pods(&self, connection: &Connection) -> PodWatch {
         let _runtime = self.runtime.enter();
         pods::watch(connection.client.clone())
+    }
+
+    /// Follows `targets`, until the returned tail is dropped.
+    pub fn tail_logs(
+        &self,
+        connection: &Connection,
+        targets: Vec<LogTarget>,
+    ) -> io::Result<LogTail> {
+        let _runtime = self.runtime.enter();
+        logs::start(connection.client.clone(), targets)
     }
 }
 

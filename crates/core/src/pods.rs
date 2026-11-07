@@ -11,6 +11,8 @@ use kube::{Api, Client};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::logs::{LogTarget, MAX_TAIL_PODS};
+
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 
 type PodKey = (String, String);
@@ -26,11 +28,19 @@ pub struct PodRow {
     pub restarts: i32,
     pub node: String,
     pub created_unix: Option<i64>,
+    pub containers: Vec<String>,
 }
 
 impl PodRow {
     fn key(&self) -> PodKey {
         (self.namespace.clone(), self.name.clone())
+    }
+
+    /// Whether `filter` appears in `namespace/name`, ignoring case.
+    pub fn matches(&self, filter: &str) -> bool {
+        format!("{}/{}", self.namespace, self.name)
+            .to_lowercase()
+            .contains(&filter.to_lowercase())
     }
 }
 
@@ -65,6 +75,12 @@ impl From<&Pod> for PodRow {
                 .creation_timestamp
                 .as_ref()
                 .map(|created| created.0.as_second()),
+            containers: pod
+                .spec
+                .iter()
+                .flat_map(|spec| &spec.containers)
+                .map(|container| container.name.clone())
+                .collect(),
         }
     }
 }
@@ -105,6 +121,24 @@ struct PodState {
     relisting: Option<PodRows>,
     synced: bool,
     error: Option<String>,
+}
+
+impl PodSnapshot {
+    /// Log targets for the first `MAX_TAIL_PODS` pods matching `filter`.
+    pub fn log_targets(&self, filter: &str) -> Vec<LogTarget> {
+        self.rows
+            .iter()
+            .filter(|row| row.matches(filter))
+            .take(MAX_TAIL_PODS)
+            .flat_map(|row| {
+                row.containers.iter().map(|container| LogTarget {
+                    namespace: row.namespace.clone(),
+                    pod: row.name.clone(),
+                    container: container.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 impl PodState {
@@ -269,6 +303,7 @@ mod tests {
                 restarts: 5,
                 node: "node-1".into(),
                 created_unix: Some(1_767_225_600),
+                containers: vec!["app".into(), "proxy".into()],
             }
         );
     }
@@ -304,6 +339,55 @@ mod tests {
     #[test]
     fn status_is_unknown_without_a_pod_status() {
         assert_eq!(PodRow::from(&pod("shop", "api")).status, "Unknown");
+    }
+
+    fn pod_with_containers(name: &str, containers: &[&str]) -> Pod {
+        let containers: Vec<_> = containers
+            .iter()
+            .map(|name| json!({ "name": name }))
+            .collect();
+        serde_json::from_value(json!({
+            "metadata": { "namespace": "shop", "name": name },
+            "spec": { "containers": containers },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn matches_namespace_and_name_ignoring_case() {
+        let row = PodRow::from(&pod("Shop", "API-1"));
+
+        assert!(row.matches(""));
+        assert!(row.matches("shop/api"));
+        assert!(row.matches("api-1"));
+        assert!(!row.matches("web"));
+    }
+
+    #[test]
+    fn log_targets_cover_every_container_of_matching_pods() {
+        let state = listed(vec![
+            pod_with_containers("api", &["app", "proxy"]),
+            pod_with_containers("web", &["app"]),
+        ]);
+
+        let targets = state.snapshot().log_targets("api");
+
+        let names: Vec<_> = targets
+            .iter()
+            .map(|t| (t.pod.as_str(), t.container.as_str()))
+            .collect();
+        assert_eq!(names, [("api", "app"), ("api", "proxy")]);
+    }
+
+    #[test]
+    fn log_targets_stop_at_the_pod_limit() {
+        let pods = (0..MAX_TAIL_PODS + 5)
+            .map(|index| pod_with_containers(&format!("pod-{index:03}"), &["app"]))
+            .collect();
+
+        let targets = listed(pods).snapshot().log_targets("");
+
+        assert_eq!(targets.len(), MAX_TAIL_PODS);
     }
 
     #[test]
