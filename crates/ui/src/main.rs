@@ -1,3 +1,4 @@
+mod logs;
 mod pods;
 mod root;
 
