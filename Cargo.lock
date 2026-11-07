@@ -7431,6 +7431,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-kit",
  "taffrail-core",
+ "tempfile",
 ]
 
 [[package]]

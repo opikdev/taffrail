@@ -33,6 +33,7 @@ scripts/sample-process-tree.py <pid> [<pid> ...] --seconds 20
 ## Avoid false results
 
 - `--features bench` removes GPUI's frame limits. Without it, an unfocused window runs at 30 fps and every frame measures 33 ms.
+- `--features bench` also ignores saved state, so a run opens at the default size on the kubeconfig's current context.
 - Footprint moves in steps of one window buffer, because the GPU holds a varying number of them, and each one scales with the window. Run `footprint <pid>` and read `IOSurface` to see this. Repeat a run, and compare apps at the same window size.
 - `top` under-reports idle wake-ups. Use `sample-process-tree.py`, which reads `proc_pid_rusage`.
 - macOS stops frames for a covered window. A run fails with `Invalid run` if frames stop, rather than reporting a false result.

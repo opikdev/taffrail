@@ -12,10 +12,11 @@ mod sidebar;
 mod theme;
 mod windows;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::assets::AllAssets;
-use taffrail_core::{Backend, Contexts, SavedState};
+use taffrail_core::{Backend, Contexts};
 
 fn main() {
     #[cfg(feature = "preview")]
@@ -30,13 +31,18 @@ fn main() {
             gpui_kit::init(cx);
             theme::init(cx);
             root::init(cx);
-            windows::init(backend.clone(), Contexts::load, cx);
-            let window = windows::open(backend, Contexts::load(), SavedState::default(), cx)
-                .expect("failed to open window");
+            let saved = windows::init(backend.clone(), state_path(), Contexts::load, cx);
+            let window =
+                windows::open(backend, Contexts::load(), saved, cx).expect("failed to open window");
             #[cfg(feature = "bench")]
             bench::run(window, cx);
             #[cfg(not(feature = "bench"))]
             drop(window);
             cx.activate(true);
         });
+}
+
+/// A benchmark must not restore a window size, or connect to the last context.
+fn state_path() -> Option<PathBuf> {
+    taffrail_core::state_path().filter(|_| !cfg!(feature = "bench"))
 }
