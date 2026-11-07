@@ -30,6 +30,7 @@ The signature element is the log timeline, a strip above the log lines that show
 - The details panel opens when you select a row, and closes with `Esc`.
 - The log dock stays open while you move between views. It can be resized or maximized.
 - Each window shows one context. Use **New window** to compare clusters.
+- **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
 
 ## Resource tables
 
@@ -77,6 +78,8 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Key | Action |
 |---|---|
 | `⌘K` / `Ctrl+K` | Open the command palette |
+| `⌘N` / `Ctrl+N` | Open a new window |
+| `⌘Q` / `Ctrl+Q` | Quit |
 | `/` | Filter the current view |
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
