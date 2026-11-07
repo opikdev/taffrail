@@ -142,7 +142,7 @@ impl Root {
         cx.notify();
     }
 
-    fn tail_logs(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn tail_logs(&mut self, cx: &mut Context<Self>) {
         let Some(connection) = &self.connection else {
             return;
         };
@@ -151,6 +151,17 @@ impl Root {
             Err(error) => self.status = format!("Failed to start log tail: {error}").into(),
         }
         cx.notify();
+    }
+
+    #[cfg(feature = "bench")]
+    pub(crate) fn synced_pod_count(&self, cx: &App) -> Option<usize> {
+        let snapshot = self.pods.read(cx).delegate().snapshot();
+        (self.connection.is_some() && snapshot.synced).then_some(snapshot.rows.len())
+    }
+
+    #[cfg(feature = "bench")]
+    pub(crate) fn scroll_pods_to(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.pods.update(cx, |pods, cx| pods.scroll_to_row(row, cx));
     }
 
     fn log_targets(&self, cx: &App) -> Vec<LogTarget> {

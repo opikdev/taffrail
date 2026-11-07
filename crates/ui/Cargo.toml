@@ -12,6 +12,9 @@ publish.workspace = true
 name = "taffrail"
 path = "src/main.rs"
 
+[features]
+bench = []
+
 [dependencies]
 gpui-kit.workspace = true
 taffrail-core.workspace = true
