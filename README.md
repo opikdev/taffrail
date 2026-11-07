@@ -8,7 +8,8 @@ The name comes from the taffrail log, a ship's instrument trailed off the stern.
 
 ## Docs
 
-- [Roadmap](docs/roadmap.md): the first milestone and its performance targets
+- [Roadmap](docs/roadmap.md): the milestones, what is out of scope, and the performance budget
+- [UI design](docs/design.md): layout, keyboard, states and colour
 - [Contributing](CONTRIBUTING.md): set up, run and check your change
 - [Simulate a large cluster](docs/how-to/simulate-a-large-cluster.md): run 5,000 pods locally
 - [Measure performance](docs/how-to/measure-performance.md): record frame times and memory
