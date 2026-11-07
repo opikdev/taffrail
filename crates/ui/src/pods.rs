@@ -19,15 +19,41 @@ const COLUMNS: [(&str, f32); 7] = [
 #[derive(Default)]
 pub struct PodTable {
     snapshot: Arc<PodSnapshot>,
+    filter: String,
+    rows: Vec<Arc<PodRow>>,
 }
 
 impl PodTable {
+    pub fn snapshot(&self) -> &PodSnapshot {
+        &self.snapshot
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
     pub fn show(&mut self, snapshot: Arc<PodSnapshot>) {
         self.snapshot = snapshot;
+        self.apply_filter();
+    }
+
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.apply_filter();
+    }
+
+    fn apply_filter(&mut self) {
+        self.rows = self
+            .snapshot
+            .rows
+            .iter()
+            .filter(|row| row.matches(&self.filter))
+            .cloned()
+            .collect();
     }
 
     fn cell(&self, row_ix: usize, col_ix: usize) -> SharedString {
-        let Some(row) = self.snapshot.rows.get(row_ix) else {
+        let Some(row) = self.rows.get(row_ix) else {
             return SharedString::default();
         };
         cell_text(row, col_ix, unix_now())
@@ -71,7 +97,7 @@ impl TableDelegate for PodTable {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.snapshot.rows.len()
+        self.rows.len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
