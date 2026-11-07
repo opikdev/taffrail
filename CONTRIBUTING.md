@@ -5,7 +5,7 @@ Read [AGENTS.md](AGENTS.md) first. Its rules apply to people and agents alike.
 ## Set up
 
 1. Install [rustup](https://rustup.rs/). `rust-toolchain.toml` selects the compiler.
-2. Install the platform toolchain: Xcode on macOS, or Visual Studio with the C++ workload on Windows.
+2. Install the platform toolchain: Xcode on macOS, Visual Studio with the C++ workload on Windows, or on Linux a C toolchain and the packages listed in [the CI workflow](.github/workflows/ci.yml).
 3. Run `cargo install cargo-deny --locked`.
 
 To test against a large cluster, see [Simulate a large cluster](docs/how-to/simulate-a-large-cluster.md).
@@ -25,7 +25,7 @@ cargo test --workspace --locked
 cargo deny --locked --workspace check
 ```
 
-CI runs these on macOS and Windows, except `cargo deny`, which runs once on Linux.
+CI runs these on macOS, Windows and Linux, except `cargo deny`, which runs once on Linux.
 
 ## Open a pull request
 
