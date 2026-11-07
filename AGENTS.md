@@ -20,6 +20,7 @@ This boundary limits the cost of leaving GPUI, so keep it strict. `deny.toml` en
 
 ## Work rules
 
+- Look at UI changes before calling them done. See [Preview the UI](docs/how-to/preview-the-ui.md).
 - Claim performance only with a measured number and the command that produced it. See [Measure performance](docs/how-to/measure-performance.md).
 - Bound log storage and spill to disk. Do not hold unbounded logs in memory.
 - Keep one task per branch and per pull request. Run parallel tasks in separate worktrees.

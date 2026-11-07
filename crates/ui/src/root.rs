@@ -273,6 +273,12 @@ impl Root {
         self.pods.update(cx, |pods, cx| pods.scroll_to_row(row, cx));
     }
 
+    #[cfg(feature = "preview")]
+    pub(crate) fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = collapsed;
+        cx.notify();
+    }
+
     fn log_targets(&self, cx: &App) -> Vec<LogTarget> {
         let table = self.pods.read(cx).delegate();
         table.snapshot().log_targets(table.filter())
