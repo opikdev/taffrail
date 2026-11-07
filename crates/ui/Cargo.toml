@@ -1,0 +1,23 @@
+[package]
+name = "taffrail-ui"
+description = "Desktop interface for Taffrail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "taffrail"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+taffrail-core.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+/target
+/.sim
+.DS_Store
+.env
+.env.*
