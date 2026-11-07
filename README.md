@@ -11,6 +11,7 @@ The name comes from the taffrail log, a ship's instrument trailed off the stern.
 - [Roadmap](docs/roadmap.md): the first milestone and its performance targets
 - [Contributing](CONTRIBUTING.md): set up, run and check your change
 - [Simulate a large cluster](docs/how-to/simulate-a-large-cluster.md): run 5,000 pods locally
+- [Measure performance](docs/how-to/measure-performance.md): record frame times and memory
 - [Decisions](docs/decisions/): why the project is built this way
 - [Security policy](SECURITY.md): report a vulnerability
 - [AGENTS.md](AGENTS.md): how AI agents work in this repo
