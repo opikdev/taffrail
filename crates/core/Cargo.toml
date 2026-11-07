@@ -11,6 +11,11 @@ publish.workspace = true
 [dependencies]
 k8s-openapi.workspace = true
 kube.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net", "io-util"] }
 
 [lints]
 workspace = true
