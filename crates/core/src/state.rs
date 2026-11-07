@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 const DIRECTORY: &str = "taffrail";
 const FILE: &str = "state.json";
 
-/// What the app restores on startup. It holds nothing from a cluster except the context name.
+/// What the app restores on startup. It holds nothing from a cluster except context and namespace names.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SavedState {
@@ -17,6 +17,8 @@ pub struct SavedState {
     pub display: Option<String>,
     pub sidebar_collapsed: bool,
     pub context: Option<String>,
+    pub namespace: Option<String>,
+    pub hidden_columns: Vec<String>,
 }
 
 /// A rectangle in logical pixels.
@@ -116,6 +118,8 @@ mod tests {
             display: Some("display-1".into()),
             sidebar_collapsed: true,
             context: Some("staging".into()),
+            namespace: Some("payments".into()),
+            hidden_columns: vec!["Node".into()],
         }
     }
 

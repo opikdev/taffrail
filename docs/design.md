@@ -31,8 +31,8 @@ The signature element is the log timeline, a strip above the log lines that show
 - The log dock stays open while you move between views. It can be resized or maximized.
 - Each window shows one context. Use **New window** to compare clusters.
 - **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
-- The app reopens where the last changed window was left, with its sidebar state and context. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
-- This state lives in `taffrail/state.json` under the platform config directory. Apart from the context name, it holds nothing from a cluster.
+- The app reopens where the last changed window was left, with its sidebar state, context, namespace and columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
+- This state lives in `taffrail/state.json` under the platform config directory. Apart from the context and namespace names, it holds nothing from a cluster.
 
 ## Resource tables
 
