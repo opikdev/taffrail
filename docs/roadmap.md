@@ -51,7 +51,6 @@ Build this first, because every later feature depends on its layout.
 
 ## Milestone 5: Version 0.1
 
-- Add a Linux build to CI.
 - Sign and notarize macOS builds, and sign Windows builds.
 - Add release builds, an update check and a changelog.
 - Review accessibility: keyboard reach, focus order, screen reader labels and input methods.
