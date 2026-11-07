@@ -1381,6 +1381,35 @@ users:
     }
 
     #[gpui_kit::test]
+    async fn a_snapshot_with_the_same_namespaces_leaves_a_search_alone(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("namespace-picker").click("input", cx);
+            window.render_frame(cx);
+            window.input("web", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            root.update(cx, |root, cx| {
+                let snapshot = root.pods.read(cx).delegate().snapshot().clone();
+                root.show_pods(Arc::new(snapshot), window, cx);
+            });
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx).as_deref(), Some("web"));
+        });
+    }
+
+    #[gpui_kit::test]
     async fn show_all_namespaces_returns_from_an_empty_namespace(cx: &mut TestAppContext) {
         let (handle, root) = open_two_namespaces(cx).await;
         set_namespace(handle, &root, "payments", cx);
