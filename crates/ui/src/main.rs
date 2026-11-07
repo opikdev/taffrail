@@ -1,3 +1,5 @@
+#[cfg(feature = "bench")]
+mod bench;
 mod logs;
 mod pods;
 mod root;
@@ -19,10 +21,16 @@ fn main() {
             }),
             ..WindowOptions::default()
         };
-        gpui_kit::open_window(options, cx, |window, cx| {
+        #[cfg(feature = "bench")]
+        let options = bench::unthrottled(options);
+        let window = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| Root::new(backend, Contexts::load(), window, cx))
         })
         .expect("failed to open window");
+        #[cfg(feature = "bench")]
+        bench::run(window, cx);
+        #[cfg(not(feature = "bench"))]
+        drop(window);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
