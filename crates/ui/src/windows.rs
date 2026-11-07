@@ -239,6 +239,8 @@ users:
     }
 
     fn init(state_path: Option<PathBuf>, cx: &mut TestAppContext) -> Arc<Backend> {
+        // Each window really connects, and the answer arrives from a backend thread.
+        cx.executor().allow_parking();
         let backend = Arc::new(Backend::new().unwrap());
         let shared = backend.clone();
         cx.update(|cx| {
