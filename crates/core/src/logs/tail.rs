@@ -149,7 +149,7 @@ async fn follow_target(
         let ended = follow_stream(&pods, &target.pod, &params, source, &lines).await;
         let not_found = matches!(&ended, Err(kube::Error::Api(status)) if status.code == NOT_FOUND);
         let reason = match ended {
-            Ok(()) => "stream ended".to_owned(),
+            Ok(()) => "tail ended".to_owned(),
             Err(error) => error.to_string(),
         };
         let note = format!("[taffrail: {reason}]").into_bytes();
