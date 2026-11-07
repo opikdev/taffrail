@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{Backend, ClusterError, Contexts};
+use taffrail_core::{Backend, ClusterError, Connection, Contexts, PodSnapshot};
+
+use crate::pods::PodTable;
 
 type ContextPicker = SelectState<Vec<String>>;
 
@@ -12,8 +15,9 @@ pub struct Root {
     backend: Arc<Backend>,
     contexts: Option<Contexts>,
     picker: Option<Entity<ContextPicker>>,
+    pods: Entity<TableState<PodTable>>,
     status: SharedString,
-    connecting: Option<Task<()>>,
+    session: Option<Task<()>>,
     _picker_events: Option<Subscription>,
 }
 
@@ -24,12 +28,19 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let pods = cx.new(|cx| {
+            TableState::new(PodTable::default(), window, cx)
+                .col_movable(false)
+                .sortable(false)
+                .row_selectable(false)
+        });
         let mut root = Self {
             backend,
             contexts: None,
             picker: None,
+            pods,
             status: "Choose a context".into(),
-            connecting: None,
+            session: None,
             _picker_events: None,
         };
         match contexts {
@@ -69,23 +80,64 @@ impl Root {
             return;
         };
         self.status = format!("Connecting to {context}").into();
-        let connection = self.backend.connect(contexts, context);
-        // Replacing the task drops any earlier attempt, so a slow context cannot overwrite a newer choice.
-        self.connecting = Some(cx.spawn(async move |this, cx| {
-            let status = match connection.await {
-                Ok(connection) => format!(
-                    "Connected to {}, server {}",
-                    connection.context, connection.server_version
-                ),
-                Err(error) => error.to_string(),
+        self.show_pods(Arc::default(), cx);
+        let connecting = self.backend.connect(contexts, context);
+        let backend = self.backend.clone();
+        // Replacing the task drops any earlier session and its watch, so a slow
+        // context cannot overwrite a newer choice.
+        self.session = Some(cx.spawn(async move |this, cx| {
+            let connection = match connecting.await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.status = error.to_string().into();
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
             };
+            let mut pods = backend.watch_pods(&connection);
+            let summary = connection_summary(&connection);
             this.update(cx, |this, cx| {
-                this.status = status.into();
+                this.status = format!("{summary}. Loading pods").into();
                 cx.notify();
             })
             .ok();
+            while let Some(snapshot) = pods.next().await {
+                let updated = this.update(cx, |this, cx| {
+                    this.status = pod_status(&summary, &snapshot).into();
+                    this.show_pods(snapshot, cx);
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
         }));
         cx.notify();
+    }
+
+    fn show_pods(&mut self, snapshot: Arc<PodSnapshot>, cx: &mut Context<Self>) {
+        self.pods.update(cx, |pods, cx| {
+            pods.delegate_mut().show(snapshot);
+            cx.notify();
+        });
+        cx.notify();
+    }
+}
+
+fn connection_summary(connection: &Connection) -> String {
+    format!(
+        "Connected to {}, server {}",
+        connection.context, connection.server_version
+    )
+}
+
+fn pod_status(summary: &str, snapshot: &PodSnapshot) -> String {
+    match (&snapshot.error, snapshot.synced) {
+        (Some(error), _) => format!("{summary}. Pod watch failed: {error}"),
+        (None, true) => format!("{summary}. Pods: {}", snapshot.rows.len()),
+        (None, false) => format!("{summary}. Loading pods"),
     }
 }
 
@@ -115,24 +167,33 @@ impl Render for Root {
                     .aria_label(self.status.clone())
                     .child(self.status.clone()),
             )
+            .child(
+                div().flex_1().min_h_0().child(
+                    DataTable::new(&self.pods)
+                        .accessibility_label("Pods")
+                        .stripe(true),
+                ),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    use gpui_kit::test::{TestAppContextExt, TestWindowExt};
-    use gpui_kit::{AnyWindowHandle, AppContext, TestAppContext, WindowOptions};
-    use taffrail_core::{Backend, Contexts};
+    use super::{Root, pod_status};
 
-    use super::Root;
+    use gpui_kit::test::{TestAppContextExt, TestQueryExt, TestWindowExt};
+    use gpui_kit::{AnyWindowHandle, AppContext, TestAppContext, WindowOptions};
+    use taffrail_core::{Backend, Contexts, PodSnapshot};
 
     const VERSION_BODY: &str = r#"{"major":"1","minor":"35","gitVersion":"v1.35.0","gitCommit":"","gitTreeState":"","buildDate":"","goVersion":"","compiler":"","platform":""}"#;
+
+    const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
 
     fn kubeconfig(server: &str, current: &str) -> String {
         format!(
@@ -154,22 +215,40 @@ users:
         )
     }
 
-    fn serve_version_once() -> String {
+    fn respond(mut stream: &TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    fn serve_request(stream: TcpStream) {
+        // Closing with unread data resets the connection on Windows, which loses the response.
+        let mut request = BufReader::new(&stream);
+        let mut request_line = String::new();
+        request.read_line(&mut request_line).unwrap();
+        let mut header = String::new();
+        while request.read_line(&mut header).unwrap() > "\r\n".len() {
+            header.clear();
+        }
+        if request_line.contains("watch=true") {
+            thread::park();
+        } else if request_line.contains("/api/v1/pods") {
+            respond(&stream, POD_LIST_BODY);
+        } else {
+            respond(&stream, VERSION_BODY);
+        }
+    }
+
+    fn serve_api() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
         thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            // Closing with unread data resets the connection on Windows, which loses the response.
-            let mut request = BufReader::new(&stream);
-            let mut line = String::new();
-            while request.read_line(&mut line).unwrap() > "\r\n".len() {
-                line.clear();
+            for stream in listener.incoming() {
+                let stream = stream.unwrap();
+                thread::spawn(move || serve_request(stream));
             }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{VERSION_BODY}",
-                VERSION_BODY.len()
-            );
-            (&stream).write_all(response.as_bytes()).unwrap();
         });
         server
     }
@@ -220,25 +299,40 @@ users:
     }
 
     #[gpui_kit::test]
-    async fn connects_to_the_current_context_on_open(cx: &mut TestAppContext) {
+    async fn shows_the_current_contexts_pods_on_open(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let contexts = Contexts::from_yaml(&kubeconfig(&serve_version_once(), "dev"));
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_api(), "dev"));
         let handle = open(contexts, cx);
 
         cx.wait_for(handle, Duration::from_secs(10), |window, _| {
-            !window
-                .find("status")
-                .label()
-                .is_some_and(|status| status.starts_with("Connecting"))
+            !window.find("status").label().is_some_and(|status| {
+                status.starts_with("Connecting") || status.ends_with("Loading pods")
+            })
         })
         .await;
 
         cx.update_window(handle, |_, window, _| {
             assert_eq!(
                 window.find("status").label(),
-                Some("Connected to dev, server v1.35.0")
+                Some("Connected to dev, server v1.35.0. Pods: 1")
             );
+            assert_eq!(window.find_all_by_label("api-1").len(), 1);
         })
         .unwrap();
+    }
+
+    #[test]
+    fn status_reports_loading_count_and_watch_errors() {
+        let mut snapshot = PodSnapshot::default();
+        assert_eq!(pod_status("Up", &snapshot), "Up. Loading pods");
+
+        snapshot.synced = true;
+        assert_eq!(pod_status("Up", &snapshot), "Up. Pods: 0");
+
+        snapshot.error = Some("forbidden".into());
+        assert_eq!(
+            pod_status("Up", &snapshot),
+            "Up. Pod watch failed: forbidden"
+        );
     }
 }
