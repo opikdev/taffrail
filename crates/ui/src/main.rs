@@ -1,5 +1,6 @@
 #[cfg(feature = "bench")]
 mod bench;
+mod details;
 #[cfg(any(test, feature = "preview"))]
 mod fake_api;
 mod logs;
@@ -29,6 +30,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             theme::init(cx);
+            root::init(cx);
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some(APP_NAME.into()),

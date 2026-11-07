@@ -135,6 +135,59 @@ fn pod_list(created: &str) -> String {
     )
 }
 
+fn pod_body(created: &str) -> String {
+    format!(
+        r#"{{"kind":"Pod","apiVersion":"v1","metadata":{{"namespace":"payments","name":"checkout-api-7f9c6d-h7vcd","uid":"3f1c9a7e-52ab-4b7e-9f55-0a0f6d1f1a11","resourceVersion":"188274","creationTimestamp":"{created}","labels":{{"app":"checkout-api","pod-template-hash":"7f9c6d","tier":"backend"}},"ownerReferences":[{{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"checkout-api-7f9c6d","uid":"9","controller":true}}],"managedFields":[{{"manager":"kube-controller-manager"}}]}},"spec":{{"nodeName":"node-07","restartPolicy":"Always","serviceAccountName":"checkout-api","containers":[{{"name":"app","image":"registry.example.com/checkout-api:2.31.0","ports":[{{"containerPort":8080,"protocol":"TCP"}}],"env":[{{"name":"POSTGRES_URL","value":"postgres://10.4.12.8:5432/checkout"}}],"resources":{{"limits":{{"memory":"512Mi"}},"requests":{{"cpu":"250m","memory":"256Mi"}}}}}},{{"name":"proxy","image":"registry.example.com/envoy:1.30.2"}}]}},"status":{{"phase":"Running","podIP":"10.4.3.21","hostIP":"10.0.7.4","containerStatuses":[{{"name":"app","image":"checkout-api:2.31.0","imageID":"x","ready":false,"restartCount":7,"state":{{"waiting":{{"reason":"CrashLoopBackOff"}}}},"lastState":{{"terminated":{{"exitCode":1,"reason":"Error"}}}}}},{{"name":"proxy","image":"envoy:1.30.2","imageID":"x","ready":true,"restartCount":0,"state":{{"running":{{"startedAt":"{created}"}}}}}}]}}}}"#
+    )
+}
+
+fn events_body() -> String {
+    let event = |name: &str, kind: &str, reason: &str, message: &str, count: u32, minute: u32| {
+        format!(
+            r#"{{"metadata":{{"name":"{name}","namespace":"payments"}},"involvedObject":{{"kind":"Pod","name":"pod"}},"type":"{kind}","reason":"{reason}","message":"{message}","count":{count},"lastTimestamp":"2026-11-07T10:{minute:02}:00Z"}}"#
+        )
+    };
+    let items = [
+        event(
+            "e1",
+            "Warning",
+            "BackOff",
+            "Back-off restarting failed container app in pod checkout-api-7f9c6d-h7vcd",
+            41,
+            46,
+        ),
+        event(
+            "e2",
+            "Normal",
+            "Pulled",
+            "Container image registry.example.com/checkout-api:2.31.0 already present on machine",
+            8,
+            42,
+        ),
+        event("e3", "Normal", "Started", "Started container app", 8, 42),
+        event(
+            "e4",
+            "Warning",
+            "Unhealthy",
+            "Readiness probe failed: connection refused",
+            3,
+            41,
+        ),
+        event(
+            "e5",
+            "Normal",
+            "Scheduled",
+            "Successfully assigned payments/checkout-api-7f9c6d-h7vcd to node-07",
+            1,
+            38,
+        ),
+    ];
+    format!(
+        r#"{{"kind":"EventList","apiVersion":"v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+        items.join(",")
+    )
+}
+
 fn log_body() -> String {
     let mut body = String::new();
     for (ix, line) in LOG_LINES.iter().cycle().take(40).enumerate() {
@@ -163,6 +216,7 @@ impl Scene {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::init(cx);
+            crate::root::init(cx);
             Theme::change(mode, None, cx);
         });
         let backend = Arc::new(Backend::new().expect("failed to start the cluster runtime"));
@@ -266,6 +320,8 @@ pub fn run(directory: PathBuf) {
     let created = "2026-11-05T08:00:00Z";
     let server = serve(Fixture {
         pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
         logs: log_body(),
     });
     assert!(WORKLOADS.len() * POD_SUFFIXES.len() > MAX_TAIL_PODS);
@@ -280,6 +336,32 @@ pub fn run(directory: PathBuf) {
         .cx
         .update(|cx| root.update(cx, |root, cx| root.set_sidebar_collapsed(true, cx)));
     collapsed.save(&directory, "collapsed-light.png");
+
+    let mut details = tailing(&server, ThemeMode::Dark);
+    let root = details.root.clone();
+    details
+        .cx
+        .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+    details.wait_until(|window, _| window.try_find("details-title").is_some());
+    details.settle();
+    details.save(&directory, "details-summary-dark.png");
+    let handle = details.handle;
+    details
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("details-tabs").click(1usize, cx);
+        })
+        .expect("preview window closed");
+    details.save(&directory, "details-events-dark.png");
+    details
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("details-tabs").click(2usize, cx);
+        })
+        .expect("preview window closed");
+    details.save(&directory, "details-yaml-dark.png");
 
     let mut picker = connected(&server, ThemeMode::Dark);
     let handle = picker.handle;

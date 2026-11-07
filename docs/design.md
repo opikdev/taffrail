@@ -34,8 +34,11 @@ The signature element is the log timeline, a strip above the log lines that show
 ## Resource tables
 
 - Rows have no dividers or stripes. Hover and selection separate them.
-- Rows are virtual, sort by any column, and update in place without moving the selection.
-- A row keeps its position under the pointer while live updates arrive, and new rows appear in sort order.
+- Rows that need attention lead by default: failed, then degraded, then healthy, then finished.
+- Clicking a header sorts by that column, then reverses it, then returns to the default order. Only the sorted column shows an arrow.
+- Rows are virtual, and update in place without moving the selection, because a selection belongs to the pod and not to a position.
+- Once you have scrolled, the row at the top of the view stays there while others move around it. At the very top of the list, new rows appear.
+- **Tail first 50 pods** follows the rows as shown, so sorting decides which pods are tailed.
 - Status shows a dot and a word in a colour, never colour alone.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
@@ -45,7 +48,12 @@ The signature element is the log timeline, a strip above the log lines that show
 |---|---|
 | Summary | Status, owner, node, containers, labels, and links to related objects |
 | Events | Recent events for this object, newest first |
-| YAML | Read-only YAML with syntax highlighting |
+| YAML | Read-only YAML with coloured keys and **Copy YAML**, without `managedFields` |
+
+- The panel reads the pod when it opens, when its row changes, and every 10 seconds.
+- Moving the selection opens that pod's details, on the Summary tab.
+- If the pod is deleted, what was read stays visible with **This pod no longer exists. Showing what was last read.**
+- A role that can read pods but not events still sees the Summary and YAML, and the Events tab says why it is empty.
 
 ## Log explorer
 
