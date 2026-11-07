@@ -28,6 +28,7 @@ const COLUMNS: [(&str, f32); 7] = [
     ("Age", 60.),
 ];
 const STATUS_DOT: f32 = 6.;
+pub const ALL_NAMESPACES: &str = "All namespaces";
 const CELL_PADDING: Edges<Pixels> = Edges {
     top: px(3.),
     bottom: px(3.),
@@ -88,6 +89,7 @@ enum SortOrder {
 pub struct PodTable {
     snapshot: Arc<PodSnapshot>,
     filter: String,
+    namespace: Option<String>,
     sort: Option<(usize, SortOrder)>,
     rows: Vec<Arc<PodRow>>,
     selected: Option<PodKey>,
@@ -115,6 +117,39 @@ impl PodTable {
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.rebuild();
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
+    pub fn set_namespace(&mut self, namespace: Option<String>) {
+        self.namespace = namespace;
+        self.rebuild();
+    }
+
+    /// What the namespace picker offers. A chosen namespace stays listed after it disappears,
+    /// so the picker can keep showing it.
+    pub fn namespace_options(&self) -> Vec<&str> {
+        let mut namespaces: Vec<&str> = namespaces(&self.snapshot).collect();
+        if let Some(chosen) = self.namespace()
+            && let Err(ix) = namespaces.binary_search(&chosen)
+        {
+            namespaces.insert(ix, chosen);
+        }
+        namespaces.insert(0, ALL_NAMESPACES);
+        namespaces
+    }
+
+    /// The chosen namespace, if the cluster has no pods in it.
+    pub fn empty_namespace(&self) -> Option<&str> {
+        let namespace = self.namespace()?;
+        let has_pods = self
+            .snapshot
+            .rows
+            .iter()
+            .any(|row| row.namespace == namespace);
+        (!has_pods).then_some(namespace)
     }
 
     /// What a tail would follow: the rows as shown, so the pods on top come first.
@@ -169,7 +204,12 @@ impl PodTable {
             .snapshot
             .rows
             .iter()
-            .filter(|row| row.matches(&self.filter))
+            .filter(|row| {
+                let in_namespace = self
+                    .namespace()
+                    .is_none_or(|namespace| row.namespace == namespace);
+                in_namespace && row.matches(&self.filter)
+            })
             .cloned()
             .collect();
         sort_rows(&mut self.rows, self.sort);
@@ -187,6 +227,14 @@ impl PodTable {
         };
         cell_text(row, col_ix, unix_now())
     }
+}
+
+/// Each namespace once. Snapshot rows arrive sorted by namespace, so this needs no set.
+fn namespaces(snapshot: &PodSnapshot) -> impl Iterator<Item = &str> {
+    snapshot
+        .rows
+        .chunk_by(|a, b| a.namespace == b.namespace)
+        .map(|rows| rows[0].namespace.as_str())
 }
 
 fn ready_counts(ready: &str) -> (u32, u32) {
@@ -413,8 +461,8 @@ mod tests {
     use taffrail_core::{PodRow, PodSnapshot};
 
     use super::{
-        AGE, PodTable, READY, RESTARTS, ROW_HEIGHT, STATUS, SortOrder, Tone, anchored_offset,
-        format_age, format_count, sort_rows, status_tone,
+        AGE, ALL_NAMESPACES, PodTable, READY, RESTARTS, ROW_HEIGHT, STATUS, SortOrder, Tone,
+        anchored_offset, format_age, format_count, sort_rows, status_tone,
     };
 
     fn row(name: &str, status: &str, ready: &str, restarts: i32, created: i64) -> Arc<PodRow> {
@@ -453,6 +501,25 @@ mod tests {
             error: None,
         }));
         table
+    }
+
+    fn in_namespace(namespace: &str, name: &str) -> Arc<PodRow> {
+        let mut row = Arc::unwrap_or_clone(row(name, "Running", "1/1", 0, 0));
+        row.namespace = namespace.into();
+        Arc::new(row)
+    }
+
+    fn across_namespaces() -> PodTable {
+        table(vec![
+            in_namespace("payments", "a"),
+            in_namespace("payments", "b"),
+            in_namespace("shop", "c"),
+            in_namespace("web", "d"),
+        ])
+    }
+
+    fn pod_names(table: &PodTable) -> Vec<&str> {
+        table.rows.iter().map(|row| row.name.as_str()).collect()
     }
 
     #[test]
@@ -550,6 +617,85 @@ mod tests {
 
         table.set_filter(String::new());
         assert_eq!(table.selected_row, Some(0));
+    }
+
+    #[test]
+    fn a_namespace_narrows_the_rows_and_the_tail() {
+        let mut table = across_namespaces();
+        table.set_namespace(Some("payments".into()));
+        assert_eq!(pod_names(&table), ["a", "b"]);
+        let targets = table.log_targets();
+        assert!(targets.iter().all(|target| target.namespace == "payments"));
+        assert_eq!(targets.len(), 2);
+
+        table.set_namespace(None);
+        assert_eq!(pod_names(&table), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_namespace_and_a_text_filter_narrow_together() {
+        let mut table = across_namespaces();
+        table.set_namespace(Some("payments".into()));
+        table.set_filter("b".into());
+        assert_eq!(pod_names(&table), ["b"]);
+    }
+
+    #[test]
+    fn a_new_snapshot_stays_in_the_chosen_namespace() {
+        let mut table = across_namespaces();
+        table.set_namespace(Some("shop".into()));
+        table.show(Arc::new(PodSnapshot {
+            rows: vec![in_namespace("shop", "c"), in_namespace("web", "z")],
+            synced: true,
+            error: None,
+        }));
+        assert_eq!(pod_names(&table), ["c"]);
+    }
+
+    #[test]
+    fn namespace_options_list_each_namespace_once_after_all() {
+        assert_eq!(
+            across_namespaces().namespace_options(),
+            [ALL_NAMESPACES, "payments", "shop", "web"]
+        );
+    }
+
+    #[test]
+    fn namespace_options_are_only_all_for_an_empty_cluster() {
+        assert_eq!(table(vec![]).namespace_options(), [ALL_NAMESPACES]);
+    }
+
+    #[test]
+    fn a_namespace_that_disappears_stays_chosen_and_empty() {
+        let mut table = across_namespaces();
+        table.set_namespace(Some("shop".into()));
+        assert_eq!(table.empty_namespace(), None);
+
+        table.show(Arc::new(PodSnapshot {
+            rows: vec![in_namespace("payments", "a"), in_namespace("web", "d")],
+            synced: true,
+            error: None,
+        }));
+
+        assert_eq!(table.namespace(), Some("shop"));
+        assert_eq!(table.visible_rows(), 0);
+        assert_eq!(table.empty_namespace(), Some("shop"));
+        assert_eq!(
+            table.namespace_options(),
+            [ALL_NAMESPACES, "payments", "shop", "web"]
+        );
+    }
+
+    #[test]
+    fn a_namespace_hides_the_selection_without_losing_it() {
+        let mut table = across_namespaces();
+        table.select_row(3);
+        table.set_namespace(Some("payments".into()));
+        assert_eq!(table.selected_row, None);
+        assert_eq!(table.selected().unwrap().1, "d");
+
+        table.set_namespace(None);
+        assert_eq!(table.selected_row, Some(3));
     }
 
     #[test]

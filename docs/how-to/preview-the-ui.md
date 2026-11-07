@@ -17,6 +17,8 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
 | `collapsed-light.png` | The sidebar collapsed to its icon rail |
 | `context-menu-dark.png` | The context picker, open |
+| `namespace-dark.png`, `namespace-menu-dark.png` | The pod table filtered to one namespace, and the namespace picker open |
+| `no-namespace-pods-light.png` | A chosen namespace with no pods |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
 

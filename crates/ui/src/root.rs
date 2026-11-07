@@ -4,7 +4,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IndexPath, Sizable, Size, StyledExt, Theme, TitleBar, h_flex,
@@ -18,10 +18,11 @@ use taffrail_core::{
 
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane};
 use crate::logs::{LogPane, dock_height};
-use crate::pods::{PodTable, show_in_place};
+use crate::pods::{ALL_NAMESPACES, PodTable, show_in_place};
 use crate::sidebar::resource_sidebar;
 
 type ContextPicker = SelectState<Vec<String>>;
+type NamespacePicker = SelectState<SearchableVec<String>>;
 
 actions!(taffrail, [NextRow, PreviousRow, CloseDetails]);
 
@@ -46,6 +47,8 @@ const CONTEXT_PICKER_CHROME: f32 = 40.;
 const CONTEXT_PICKER_WIDTH: Range<f32> = 96.0..260.0;
 const CONTEXT_BADGE_SIZE: f32 = 20.;
 const FILTER_WIDTH: f32 = 240.;
+const NAMESPACE_PICKER_WIDTH: f32 = 148.;
+const NAMESPACE_MENU_WIDTH: f32 = 240.;
 const NOTICE_WIDTH: f32 = 420.;
 const CONNECTION_DOT: f32 = 7.;
 
@@ -81,6 +84,7 @@ enum NoticeAction {
     ReloadContexts,
     RetryConnection,
     ClearFilter,
+    ShowAllNamespaces,
 }
 
 struct Notice {
@@ -115,6 +119,8 @@ pub struct Root {
     picker: Option<Entity<ContextPicker>>,
     pods: Entity<TableState<PodTable>>,
     filter: Entity<InputState>,
+    namespace_picker: Entity<NamespacePicker>,
+    namespace_options: Vec<String>,
     connection: Option<Connection>,
     logs: Option<Entity<LogPane>>,
     details: Option<Entity<DetailsPane>>,
@@ -124,6 +130,7 @@ pub struct Root {
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
+    _namespace_events: Subscription,
     _table_events: Subscription,
     _details_events: Option<Subscription>,
     _appearance: Subscription,
@@ -149,6 +156,22 @@ impl Root {
                 this.apply_filter(filter, cx);
             }
         });
+        let namespace_options = vec![ALL_NAMESPACES.to_owned()];
+        let namespace_picker = cx.new(|cx| {
+            let options = SearchableVec::new(namespace_options.clone());
+            SelectState::new(options, Some(IndexPath::default()), window, cx).searchable(true)
+        });
+        let namespace_events = cx.subscribe_in(
+            &namespace_picker,
+            window,
+            |this, _, event: &SelectEvent<SearchableVec<String>>, window, cx| {
+                let SelectEvent::Confirm(Some(choice)) = event else {
+                    return;
+                };
+                let namespace = (choice != ALL_NAMESPACES).then(|| choice.clone());
+                this.set_namespace(namespace, window, cx);
+            },
+        );
         let table_events =
             cx.subscribe_in(&pods, window, |this, _, event: &TableEvent, window, cx| {
                 if matches!(event, TableEvent::SelectRow(_)) {
@@ -167,6 +190,8 @@ impl Root {
             picker: None,
             pods,
             filter,
+            namespace_picker,
+            namespace_options,
             connection: None,
             logs: None,
             details: None,
@@ -176,6 +201,7 @@ impl Root {
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
+            _namespace_events: namespace_events,
             _table_events: table_events,
             _details_events: None,
             _appearance: appearance,
@@ -215,22 +241,22 @@ impl Root {
         self._picker_events = Some(cx.subscribe_in(
             &picker,
             window,
-            |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
+            |this, _, event: &SelectEvent<Vec<String>>, window, cx| {
                 let SelectEvent::Confirm(Some(context)) = event else {
                     return;
                 };
-                this.connect(context.clone(), cx);
+                this.connect(context.clone(), window, cx);
             },
         ));
         self.picker = Some(picker);
         self.contexts = Some(contexts);
         self.session = Session::ChooseContext;
         if let Some(current) = current {
-            self.connect(current, cx);
+            self.connect(current, window, cx);
         }
     }
 
-    fn connect(&mut self, context: String, cx: &mut Context<Self>) {
+    fn connect(&mut self, context: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(contexts) = self.contexts.clone() else {
             return;
         };
@@ -240,12 +266,12 @@ impl Root {
         self.connection = None;
         self.logs = None;
         self.close_details(cx);
-        self.show_pods(Arc::default(), cx);
+        self.show_pods(Arc::default(), window, cx);
         let connecting = self.backend.connect(contexts, context.clone());
         let backend = self.backend.clone();
         // Replacing the task drops any earlier session and its watch, so a slow
         // context cannot overwrite a newer choice.
-        self.connect_task = Some(cx.spawn(async move |this, cx| {
+        self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let connection = match connecting.await {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -271,7 +297,8 @@ impl Root {
             })
             .ok();
             while let Some(snapshot) = pods.next().await {
-                let updated = this.update(cx, |this, cx| this.show_pods(snapshot, cx));
+                let updated =
+                    this.update_in(cx, |this, window, cx| this.show_pods(snapshot, window, cx));
                 if updated.is_err() {
                     return;
                 }
@@ -363,10 +390,53 @@ impl Root {
         self.pods.read(cx).delegate().log_targets()
     }
 
-    fn show_pods(&mut self, snapshot: Arc<PodSnapshot>, cx: &mut Context<Self>) {
+    fn show_pods(
+        &mut self,
+        snapshot: Arc<PodSnapshot>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.pods
             .update(cx, |pods, cx| show_in_place(pods, snapshot, cx));
+        self.update_namespace_options(window, cx);
         self.update_details(cx);
+        cx.notify();
+    }
+
+    /// Snapshots arrive up to 10 times a second, and most leave the namespaces alone.
+    fn update_namespace_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let options = self.pods.read(cx).delegate().namespace_options();
+        if options == self.namespace_options {
+            return;
+        }
+        let options: Vec<String> = options.into_iter().map(str::to_owned).collect();
+        self.namespace_options.clone_from(&options);
+        self.namespace_picker.update(cx, |picker, cx| {
+            picker.set_items(options.into(), window, cx);
+        });
+    }
+
+    pub(crate) fn namespace(&self, cx: &App) -> Option<String> {
+        self.pods.read(cx).delegate().namespace().map(str::to_owned)
+    }
+
+    pub(crate) fn set_namespace(
+        &mut self,
+        namespace: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pods.update(cx, |pods, cx| {
+            pods.delegate_mut().set_namespace(namespace);
+            cx.notify();
+        });
+        self.update_namespace_options(window, cx);
+        let choice = self
+            .namespace(cx)
+            .unwrap_or_else(|| ALL_NAMESPACES.to_owned());
+        self.namespace_picker.update(cx, |picker, cx| {
+            picker.set_selected_value(&choice, window, cx);
+        });
         cx.notify();
     }
 
@@ -404,7 +474,7 @@ impl Root {
             NoticeAction::ReloadContexts => self.load_contexts(Contexts::load(), window, cx),
             NoticeAction::RetryConnection => {
                 if let Session::Failed { context, .. } = &self.session {
-                    self.connect(context.clone(), cx);
+                    self.connect(context.clone(), window, cx);
                 }
             }
             NoticeAction::ClearFilter => {
@@ -412,6 +482,7 @@ impl Root {
                     .update(cx, |filter, cx| filter.set_value("", window, cx));
                 self.apply_filter(String::new(), cx);
             }
+            NoticeAction::ShowAllNamespaces => self.set_namespace(None, window, cx),
         }
     }
 
@@ -461,13 +532,7 @@ impl Root {
                 ))
             }
             Session::Connected { .. } if table.visible_rows() > 0 => None,
-            Session::Connected { .. } if table.filter().is_empty() => {
-                Some(Notice::new("No pods in this cluster"))
-            }
-            Session::Connected { .. } => Some(
-                Notice::new(format!("No pods match \"{}\"", table.filter()))
-                    .action(NoticeAction::ClearFilter, "Clear filter"),
-            ),
+            Session::Connected { .. } => Some(no_rows_notice(table)),
         }
     }
 
@@ -607,6 +672,16 @@ impl Root {
             .child(div().font_medium().child("Pods"))
             .child(div().flex_1())
             .child(
+                div().w(px(NAMESPACE_PICKER_WIDTH)).child(
+                    Select::new(&self.namespace_picker)
+                        .id("namespace-picker")
+                        .small()
+                        .menu_width(px(NAMESPACE_MENU_WIDTH))
+                        .accessibility_label("Namespace")
+                        .search_placeholder("Search namespaces"),
+                ),
+            )
+            .child(
                 div().w(px(FILTER_WIDTH)).child(
                     Input::new(&self.filter)
                         .id("pod-filter")
@@ -661,6 +736,18 @@ impl Root {
                 )
             })
     }
+}
+
+fn no_rows_notice(table: &PodTable) -> Notice {
+    if let Some(namespace) = table.empty_namespace() {
+        return Notice::new(format!("No pods in {namespace}"))
+            .action(NoticeAction::ShowAllNamespaces, "Show all namespaces");
+    }
+    if table.filter().is_empty() {
+        return Notice::new("No pods in this cluster");
+    }
+    Notice::new(format!("No pods match \"{}\"", table.filter()))
+        .action(NoticeAction::ClearFilter, "Clear filter")
 }
 
 fn connection_summary(connection: &Connection) -> String {
@@ -795,31 +882,37 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{Root, distinct_pods, pod_status, tail_label};
+    use super::{Root, distinct_pods, no_rows_notice, pod_status, tail_label};
     use crate::fake_api::{Fixture, kubeconfig, serve};
+    use crate::pods::PodTable;
 
     use gpui_kit::test::{TestAppContextExt, TestQueryExt, TestWindowExt};
-    use gpui_kit::{AnyWindowHandle, AppContext, TestAppContext, WindowOptions};
-    use taffrail_core::{Backend, Contexts, LogTarget, PodSnapshot};
+    use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, WindowOptions};
+    use taffrail_core::{Backend, Contexts, LogTarget, PodRow, PodSnapshot};
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
+    const TWO_NAMESPACES_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const POD_BODY: &str = r#"{"kind":"Pod","apiVersion":"v1","metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app","image":"api:1"}]},"status":{"phase":"Running"}}"#;
     const EVENTS_BODY: &str = r#"{"kind":"EventList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"e1","namespace":"shop"},"involvedObject":{"kind":"Pod","name":"api-1"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container"}]}"#;
     const LOG_BODY: &str = "2026-01-01T00:00:00Z first line\n";
 
-    fn serve_api() -> String {
+    fn serve_pods(pod_list: &str) -> String {
         serve(Fixture {
-            pod_list: POD_LIST_BODY.into(),
+            pod_list: pod_list.into(),
             pod: POD_BODY.into(),
             events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
         })
     }
 
-    fn open(
+    fn serve_api() -> String {
+        serve_pods(POD_LIST_BODY)
+    }
+
+    fn open_root(
         contexts: Result<Contexts, taffrail_core::ClusterError>,
         cx: &mut TestAppContext,
-    ) -> AnyWindowHandle {
+    ) -> (AnyWindowHandle, Entity<Root>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             super::init(cx);
@@ -830,8 +923,14 @@ mod tests {
                 cx.new(|cx| Root::new(backend, contexts, window, cx))
             })
             .unwrap()
-            .0
         })
+    }
+
+    fn open(
+        contexts: Result<Contexts, taffrail_core::ClusterError>,
+        cx: &mut TestAppContext,
+    ) -> AnyWindowHandle {
+        open_root(contexts, cx).0
     }
 
     #[gpui_kit::test]
@@ -1097,6 +1196,226 @@ users:
             assert_eq!(window.find_all_by_label("api-1").len(), 1);
         })
         .unwrap();
+    }
+
+    async fn open_two_namespaces(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_pods(TWO_NAMESPACES_BODY), "dev"));
+        let (handle, root) = open_root(contexts, cx);
+        wait_for_pods(handle, cx).await;
+        (handle, root)
+    }
+
+    fn set_namespace(
+        handle: AnyWindowHandle,
+        root: &Entity<Root>,
+        namespace: &str,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update_window(handle, |_, window, cx| {
+            root.update(cx, |root, cx| {
+                root.set_namespace(Some(namespace.into()), window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn choosing_a_namespace_narrows_the_table_and_the_tail(cx: &mut TestAppContext) {
+        let (handle, _) = open_two_namespaces(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("namespace-picker").value(),
+                Some("All namespaces")
+            );
+            assert_eq!(window.find("tail-logs").label(), Some("Tail 2 pods"));
+            window.within("namespace-picker").click("input", cx);
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("namespace-picker").value(), Some("shop"));
+            assert_eq!(window.find_all_by_label("api-1").len(), 1);
+            assert!(window.find_all_by_label("front-1").is_empty());
+            assert_eq!(window.find("tail-logs").label(), Some("Tail 1 pod"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn typing_in_the_namespace_picker_searches_it(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("namespace-picker").click("input", cx);
+            window.render_frame(cx);
+            window.input("web", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx).as_deref(), Some("web"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn show_all_namespaces_returns_from_an_empty_namespace(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+        set_namespace(handle, &root, "payments", cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(window.find("namespace-picker").value(), Some("payments"));
+            assert_eq!(window.find("tail-logs").label(), Some("Tail logs"));
+            assert_eq!(
+                window.find("notice-action").label(),
+                Some("Show all namespaces")
+            );
+            window.click("notice-action", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("namespace-picker").value(),
+                Some("All namespaces")
+            );
+            assert_eq!(window.find_all_by_label("api-1").len(), 1);
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| assert_eq!(root.namespace(cx), None));
+    }
+
+    #[gpui_kit::test]
+    async fn a_namespace_that_disappears_stays_chosen(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+        set_namespace(handle, &root, "shop", cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            let snapshot = Arc::new(PodSnapshot {
+                synced: true,
+                ..PodSnapshot::default()
+            });
+            root.update(cx, |root, cx| root.show_pods(snapshot, window, cx));
+            window.render_frame(cx);
+            assert_eq!(window.find("namespace-picker").value(), Some("shop"));
+            assert_eq!(
+                window.find("notice-action").label(),
+                Some("Show all namespaces")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_namespace_hiding_the_selected_pod_keeps_its_details_open(cx: &mut TestAppContext) {
+        let (handle, root) = open_two_namespaces(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("j", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("details-title").label(), Some("api-1"));
+        })
+        .unwrap();
+        set_namespace(handle, &root, "web", cx);
+
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("front-1").len() == 1);
+            assert_eq!(window.find("details-title").label(), Some("api-1"));
+        })
+        .unwrap();
+    }
+
+    fn pod_in(namespace: &str) -> Arc<PodRow> {
+        Arc::new(PodRow {
+            namespace: namespace.into(),
+            name: "api-1".into(),
+            status: "Running".into(),
+            ready: "1/1".into(),
+            restarts: 0,
+            node: "node-1".into(),
+            created_unix: None,
+            containers: vec!["app".into()],
+        })
+    }
+
+    fn table_of(namespaces: &[&str]) -> PodTable {
+        let mut table = PodTable::default();
+        table.show(Arc::new(PodSnapshot {
+            rows: namespaces
+                .iter()
+                .map(|namespace| pod_in(namespace))
+                .collect(),
+            synced: true,
+            error: None,
+        }));
+        table
+    }
+
+    fn notice_for(table: &PodTable) -> (String, Option<&'static str>) {
+        let notice = no_rows_notice(table);
+        (
+            notice.title.to_string(),
+            notice.action.map(|(_, label)| label),
+        )
+    }
+
+    #[test]
+    fn an_empty_namespace_offers_all_namespaces() {
+        let mut table = table_of(&["shop"]);
+        table.set_namespace(Some("payments".into()));
+        assert_eq!(
+            notice_for(&table),
+            ("No pods in payments".into(), Some("Show all namespaces"))
+        );
+    }
+
+    #[test]
+    fn a_text_filter_with_no_matches_in_a_namespace_offers_to_clear_it() {
+        let mut table = table_of(&["shop"]);
+        table.set_namespace(Some("shop".into()));
+        table.set_filter("web".into());
+        assert_eq!(
+            notice_for(&table),
+            ("No pods match \"web\"".into(), Some("Clear filter"))
+        );
+    }
+
+    #[test]
+    fn an_empty_namespace_explains_itself_before_a_text_filter() {
+        let mut table = table_of(&["shop"]);
+        table.set_namespace(Some("payments".into()));
+        table.set_filter("web".into());
+        assert_eq!(
+            notice_for(&table),
+            ("No pods in payments".into(), Some("Show all namespaces"))
+        );
+    }
+
+    #[test]
+    fn an_empty_cluster_has_nothing_to_clear() {
+        assert_eq!(
+            notice_for(&table_of(&[])),
+            ("No pods in this cluster".into(), None)
+        );
     }
 
     fn target(pod: &str, container: &str) -> LogTarget {

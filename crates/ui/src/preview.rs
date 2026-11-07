@@ -272,6 +272,17 @@ impl Scene {
         });
     }
 
+    fn set_namespace(&mut self, namespace: &str) {
+        let (handle, root) = (self.handle, self.root.clone());
+        self.cx
+            .update_window(handle, |_, window, cx| {
+                root.update(cx, |root, cx| {
+                    root.set_namespace(Some(namespace.into()), window, cx);
+                });
+            })
+            .expect("preview window closed");
+    }
+
     fn save(&mut self, directory: &Path, name: &str) {
         let (handle, mode) = (self.handle, self.mode);
         // The headless window always reports a light system, which resets the theme on open.
@@ -373,6 +384,23 @@ pub fn run(directory: PathBuf) {
         })
         .expect("preview window closed");
     picker.save(&directory, "context-menu-dark.png");
+
+    let mut namespaces = connected(&server, ThemeMode::Dark);
+    namespaces.set_namespace("payments");
+    namespaces.save(&directory, "namespace-dark.png");
+    let handle = namespaces.handle;
+    namespaces
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("namespace-picker").click("input", cx);
+        })
+        .expect("preview window closed");
+    namespaces.save(&directory, "namespace-menu-dark.png");
+
+    let mut empty = connected(&server, ThemeMode::Light);
+    empty.set_namespace("billing");
+    empty.save(&directory, "no-namespace-pods-light.png");
 
     let unreachable = Contexts::from_yaml(&kubeconfig("http://127.0.0.1:1", "dev"));
     let mut failed = Scene::open(unreachable, ThemeMode::Dark);
