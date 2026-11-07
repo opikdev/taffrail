@@ -6,6 +6,7 @@ use kube::config::{KubeConfigOptions, Kubeconfig, KubeconfigError};
 use kube::{Client, Config};
 use tokio::runtime::{self, Runtime};
 
+use crate::details::{self, PodDetails};
 use crate::logs::{self, LogTail, LogTarget};
 use crate::pods::{self, PodWatch};
 
@@ -33,6 +34,8 @@ pub enum ClusterError {
         context: String,
         source: tokio::task::JoinError,
     },
+    #[error("Failed to read pod {pod}: {error}")]
+    PodDetails { pod: String, error: String },
 }
 
 /// The contexts in the user's kubeconfig.
@@ -143,6 +146,25 @@ impl Backend {
     pub fn watch_pods(&self, connection: &Connection) -> PodWatch {
         let _runtime = self.runtime.enter();
         pods::watch(connection.client.clone())
+    }
+
+    /// Reads one pod and its recent events.
+    pub fn pod_details(
+        &self,
+        connection: &Connection,
+        namespace: String,
+        name: String,
+    ) -> impl Future<Output = Result<PodDetails, ClusterError>> + use<> {
+        let pod = format!("{namespace}/{name}");
+        let task = self
+            .runtime
+            .spawn(details::load(connection.client.clone(), namespace, name));
+        async move {
+            task.await.map_err(|error| ClusterError::PodDetails {
+                pod,
+                error: error.to_string(),
+            })?
+        }
     }
 
     /// Follows `targets`, until the returned tail is dropped.

@@ -7416,6 +7416,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "serde-saphyr 2.1.1",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
