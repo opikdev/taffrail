@@ -120,7 +120,7 @@ impl Render for Root {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
@@ -158,13 +158,18 @@ users:
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream.read_exact(&mut [0; 1]).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            // Closing with unread data resets the connection on Windows, which loses the response.
+            let mut request = BufReader::new(&stream);
+            let mut line = String::new();
+            while request.read_line(&mut line).unwrap() > "\r\n".len() {
+                line.clear();
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{VERSION_BODY}",
                 VERSION_BODY.len()
             );
-            stream.write_all(response.as_bytes()).unwrap();
+            (&stream).write_all(response.as_bytes()).unwrap();
         });
         server
     }
@@ -221,8 +226,19 @@ users:
         let handle = open(contexts, cx);
 
         cx.wait_for(handle, Duration::from_secs(10), |window, _| {
-            window.find("status").label() == Some("Connected to dev, server v1.35.0")
+            !window
+                .find("status")
+                .label()
+                .is_some_and(|status| status.starts_with("Connecting"))
         })
         .await;
+
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find("status").label(),
+                Some("Connected to dev, server v1.35.0")
+            );
+        })
+        .unwrap();
     }
 }
