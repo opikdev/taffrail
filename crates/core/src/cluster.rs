@@ -6,6 +6,8 @@ use kube::config::{KubeConfigOptions, Kubeconfig, KubeconfigError};
 use kube::{Client, Config};
 use tokio::runtime::{self, Runtime};
 
+use crate::pods::{self, PodWatch};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_THREADS: usize = 2;
 
@@ -81,8 +83,12 @@ impl Contexts {
                 context: context.clone(),
                 source,
             })?;
-        let request = async { Client::try_from(config)?.apiserver_version().await };
-        let version = tokio::time::timeout(CONNECT_TIMEOUT, request)
+        let request = async {
+            let client = Client::try_from(config)?;
+            let version = client.apiserver_version().await?;
+            Ok::<_, kube::Error>((client, version))
+        };
+        let (client, version) = tokio::time::timeout(CONNECT_TIMEOUT, request)
             .await
             .map_err(|_| ClusterError::Timeout(context.clone()))?
             .map_err(|source| ClusterError::Connect {
@@ -92,6 +98,7 @@ impl Contexts {
         Ok(Connection {
             context,
             server_version: version.git_version,
+            client,
         })
     }
 }
@@ -101,6 +108,7 @@ impl Contexts {
 pub struct Connection {
     pub context: String,
     pub server_version: String,
+    client: Client,
 }
 
 /// Runs cluster work on its own threads, away from the UI executor.
@@ -128,6 +136,12 @@ impl Backend {
             task.await
                 .map_err(|source| ClusterError::Task { context, source })?
         }
+    }
+
+    /// Watches every pod the connection can see, until the returned watch is dropped.
+    pub fn watch_pods(&self, connection: &Connection) -> PodWatch {
+        let _runtime = self.runtime.enter();
+        pods::watch(connection.client.clone())
     }
 }
 
