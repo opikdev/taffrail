@@ -14,13 +14,14 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodSnapshot,
+    Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodSnapshot, SavedState,
 };
 
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane};
 use crate::logs::{LogPane, dock_height};
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
+use crate::windows;
 
 type ContextPicker = SelectState<Vec<String>>;
 type NamespacePicker = SelectState<SearchableVec<String>>;
@@ -136,6 +137,7 @@ pub struct Root {
     focus_handle: FocusHandle,
     session: Session,
     sidebar_collapsed: bool,
+    saved_context: Option<String>,
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
@@ -149,6 +151,7 @@ impl Root {
     pub fn new(
         backend: Arc<Backend>,
         contexts: Result<Contexts, ClusterError>,
+        saved: SavedState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -206,7 +209,8 @@ impl Root {
             details: None,
             focus_handle,
             session: Session::ChooseContext,
-            sidebar_collapsed: false,
+            sidebar_collapsed: saved.sidebar_collapsed,
+            saved_context: saved.context,
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
@@ -241,7 +245,9 @@ impl Root {
 
     fn show_contexts(&mut self, contexts: Contexts, window: &mut Window, cx: &mut Context<Self>) {
         let names = contexts.names();
-        let current = contexts.current().map(str::to_owned);
+        let current = contexts
+            .preferred(self.saved_context.as_deref())
+            .map(str::to_owned);
         let selected = current
             .as_ref()
             .and_then(|current| names.iter().position(|name| name == current))
@@ -263,6 +269,18 @@ impl Root {
         if let Some(current) = current {
             self.connect(current, window, cx);
         }
+    }
+
+    /// What to restore this window to. The saved context survives a window that has none
+    /// selected, such as when the kubeconfig fails to load.
+    pub(crate) fn saved_state(&self, window: &Window, cx: &App) -> SavedState {
+        let context = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.read(cx).selected_value())
+            .cloned()
+            .or_else(|| self.saved_context.clone());
+        windows::capture(context, self.sidebar_collapsed, window, cx)
     }
 
     fn connect(&mut self, context: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -973,7 +991,7 @@ mod tests {
         AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds,
         WindowOptions, px, size,
     };
-    use taffrail_core::{Backend, Contexts, LogTarget, PodRow, PodSnapshot};
+    use taffrail_core::{Backend, Contexts, LogTarget, PodRow, PodSnapshot, SavedState};
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const TWO_NAMESPACES_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
@@ -994,29 +1012,41 @@ mod tests {
         serve_pods(POD_LIST_BODY)
     }
 
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init(cx);
+        });
+    }
+
     fn open_with(
+        backend: Arc<Backend>,
         contexts: Result<Contexts, taffrail_core::ClusterError>,
         options: WindowOptions,
         cx: &mut TestAppContext,
     ) -> (AnyWindowHandle, Entity<Root>) {
         cx.update(|cx| {
-            gpui_kit::init(cx);
-            super::init(cx);
-        });
-        let backend = Arc::new(Backend::new().unwrap());
-        cx.update(|cx| {
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Root::new(backend, contexts, window, cx))
+                cx.new(|cx| Root::new(backend, contexts, SavedState::default(), window, cx))
             })
             .unwrap()
         })
+    }
+
+    fn open_on(
+        backend: Arc<Backend>,
+        contexts: Result<Contexts, taffrail_core::ClusterError>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        open_with(backend, contexts, WindowOptions::default(), cx)
     }
 
     fn open_root(
         contexts: Result<Contexts, taffrail_core::ClusterError>,
         cx: &mut TestAppContext,
     ) -> (AnyWindowHandle, Entity<Root>) {
-        open_with(contexts, WindowOptions::default(), cx)
+        init(cx);
+        open_on(Arc::new(Backend::new().unwrap()), contexts, cx)
     }
 
     fn open_sized(
@@ -1024,12 +1054,13 @@ mod tests {
         width: f32,
         cx: &mut TestAppContext,
     ) -> AnyWindowHandle {
+        init(cx);
         let bounds = Bounds::new(Point::default(), size(px(width), px(600.)));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..WindowOptions::default()
         };
-        open_with(contexts, options, cx).0
+        open_with(Arc::new(Backend::new().unwrap()), contexts, options, cx).0
     }
 
     fn open(
@@ -1202,6 +1233,46 @@ users:
             window.click("log-mode", cx);
             window.render_frame(cx);
             assert_eq!(window.find("log-mode").label(), Some("Follow"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn closing_a_window_drops_its_session_and_leaves_the_other_running(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        init(cx);
+        let backend = Arc::new(Backend::new().unwrap());
+        let server = serve_api();
+        let contexts = || Contexts::from_yaml(&kubeconfig(&server, "dev"));
+        let (closing, root) = open_on(backend.clone(), contexts(), cx);
+        let (kept, _kept_root) = open_on(backend.clone(), contexts(), cx);
+        wait_for_pods(closing, cx).await;
+        wait_for_pods(kept, cx).await;
+        cx.update_window(closing, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        let logs = cx.read_entity(&root, |root, _| root.logs.as_ref().unwrap().downgrade());
+        let closed_root = root.downgrade();
+        drop(root);
+
+        cx.update_window(closing, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(closed_root.upgrade().is_none());
+        assert!(logs.upgrade().is_none());
+        // This test, then the kept window's Root and its session task.
+        assert_eq!(Arc::strong_count(&backend), 3);
+        cx.update_window(kept, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("status").label(),
+                Some("Connected to dev, server v1.35.0. Pods: 1")
+            );
         })
         .unwrap();
     }

@@ -8,7 +8,7 @@ use gpui_kit::assets::AllAssets;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::*;
-use taffrail_core::{Backend, ClusterError, Contexts, MAX_TAIL_PODS};
+use taffrail_core::{Backend, ClusterError, Contexts, MAX_TAIL_PODS, SavedState};
 
 use crate::fake_api::{Fixture, kubeconfig, serve};
 use crate::root::Root;
@@ -241,7 +241,7 @@ impl Scene {
         let (handle, root) = cx
             .update(|cx| {
                 gpui_kit::open_window(options, cx, |window, cx| {
-                    cx.new(|cx| Root::new(backend, contexts, window, cx))
+                    cx.new(|cx| Root::new(backend, contexts, SavedState::default(), window, cx))
                 })
             })
             .expect("failed to open window");

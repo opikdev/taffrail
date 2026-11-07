@@ -10,13 +10,12 @@ mod preview;
 mod root;
 mod sidebar;
 mod theme;
+mod windows;
 
 use std::sync::Arc;
 
 use gpui_kit::assets::AllAssets;
-use gpui_kit::*;
-use root::Root;
-use taffrail_core::{APP_NAME, Backend, Contexts};
+use taffrail_core::{Backend, Contexts, SavedState};
 
 fn main() {
     #[cfg(feature = "preview")]
@@ -31,26 +30,13 @@ fn main() {
             gpui_kit::init(cx);
             theme::init(cx);
             root::init(cx);
-            let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some(APP_NAME.into()),
-                    ..root::titlebar_options()
-                }),
-                app_owns_titlebar_drag: true,
-                window_min_size: Some(size(px(760.), px(480.))),
-                ..WindowOptions::default()
-            };
-            #[cfg(feature = "bench")]
-            let options = bench::unthrottled(options);
-            let window = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Root::new(backend, Contexts::load(), window, cx))
-            })
-            .expect("failed to open window");
+            windows::init(backend.clone(), Contexts::load, cx);
+            let window = windows::open(backend, Contexts::load(), SavedState::default(), cx)
+                .expect("failed to open window");
             #[cfg(feature = "bench")]
             bench::run(window, cx);
             #[cfg(not(feature = "bench"))]
             drop(window);
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
             cx.activate(true);
         });
 }
