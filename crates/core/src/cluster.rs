@@ -76,6 +76,18 @@ impl Contexts {
             .then_some(current)
     }
 
+    /// `saved` if it still exists, otherwise the current context.
+    pub fn preferred<'a>(&'a self, saved: Option<&'a str>) -> Option<&'a str> {
+        saved
+            .filter(|saved| {
+                self.kubeconfig
+                    .contexts
+                    .iter()
+                    .any(|context| context.name == *saved)
+            })
+            .or_else(|| self.current())
+    }
+
     async fn connect(self, context: String) -> Result<Connection, ClusterError> {
         let options = KubeConfigOptions {
             context: Some(context.clone()),
@@ -241,6 +253,21 @@ users:
         let contexts = Contexts::from_yaml(&yaml).unwrap();
 
         assert_eq!(contexts.current(), None);
+    }
+
+    #[test]
+    fn prefers_a_saved_context_that_still_exists() {
+        let contexts = Contexts::from_yaml(&kubeconfig("http://127.0.0.1:1", "{}")).unwrap();
+
+        assert_eq!(contexts.preferred(Some("broken")), Some("broken"));
+    }
+
+    #[test]
+    fn falls_back_to_the_current_context_without_a_usable_saved_one() {
+        let contexts = Contexts::from_yaml(&kubeconfig("http://127.0.0.1:1", "{}")).unwrap();
+
+        assert_eq!(contexts.preferred(Some("gone")), Some("dev"));
+        assert_eq!(contexts.preferred(None), Some("dev"));
     }
 
     #[test]
