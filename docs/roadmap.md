@@ -17,7 +17,7 @@ Each milestone ends with `scripts/bench.sh` inside the [performance budget](#per
 Build this first, because every later feature depends on its layout.
 
 - Add the theme tokens from the design, with light and dark themes that follow the system.
-- Add the shell: title bar, sidebar, content area, details panel, log dock and status bar.
+- Add the shell: title bar, sidebar, content panel, details panel and log dock.
 - Save the window layout, the last context and the last namespace.
 - Select rows by object identity, so a selection stays on its pod while rows change.
 - Add sorting, a namespace filter and custom column visibility to the pod table.
