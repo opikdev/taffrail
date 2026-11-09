@@ -17,6 +17,7 @@ Each run scrolls the pod table three rows per frame while pods churn: once alone
 | `frames`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms` | Time between presented frames |
 | `over_17ms`, `over_33ms` | Frames slower than these limits |
 | `log_sources`, `log_lines` | Containers the tail has streamed in all, and the last line number |
+| `log_lost`, `log_repeated`, `log_gaps` | Lines missing from each source's simulated `seq` numbers, lines stored twice, and rows marking lines that may be missing |
 | `followed_pods`, `matching_pods` | Pods a follow tails at the end, and pods that match |
 | `footprint_mb`, `peak_footprint_mb` | Physical footprint, the figure Activity Monitor shows |
 | `cpu_percent` | CPU time as a percentage of one core |
@@ -33,6 +34,16 @@ cargo test --release -p taffrail-core _speed -- --ignored --nocapture --test-thr
 ```
 
 `parse_speed` prints the time per line. `store_speed` prints the time to find severities, store, read, and find them again on read, and the share of disk the stored severity takes.
+
+## Measure log reconnects
+
+Tail 50 simulated pods through a local proxy that cuts every connection at an interval, without opening a window:
+
+```sh
+TAFFRAIL_SIM_CONTEXT=kwok-taffrail cargo test --release -p taffrail-core sim_reconnects -- --ignored --nocapture
+```
+
+It prints one JSON line with the lines stored and per second, the lines `lost` and `repeated` by each source's `seq` numbers, the `gaps` marked, and the `notes` Taffrail wrote, one per ended stream. `TAFFRAIL_SIM_SECONDS` sets the duration, 60 by default, and `TAFFRAIL_SIM_CUT_SECONDS` the interval, 10 by default or `0` for none. To test a restarted API server, run `docker restart kwok-taffrail-kube-apiserver` during a run.
 
 ## Sample a running process
 

@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,9 @@ pub struct Fixture {
     pub live_logs: Option<&'static [&'static str]>,
     /// Objects read by exact path, such as a pod's ReplicaSet and Deployment.
     pub objects: Vec<(String, String)>,
+    /// When set, a log request after a pod's first gets this in place of `logs`, as a log
+    /// that rotated while the stream was down.
+    pub reconnect_logs: Option<String>,
 }
 
 /// A kubeconfig whose only context, `dev`, points at `server`.
@@ -73,7 +77,12 @@ fn stream_logs(mut stream: &TcpStream, request_line: &str, messages: &[&str], st
     }
 }
 
-fn serve_request(stream: TcpStream, fixture: &Fixture, started: Instant) {
+fn serve_request(
+    stream: TcpStream,
+    fixture: &Fixture,
+    logs_read: &Mutex<HashSet<String>>,
+    started: Instant,
+) {
     // Closing with unread data resets the connection on Windows, which loses the response.
     let mut request = BufReader::new(&stream);
     let mut request_line = String::new();
@@ -96,7 +105,13 @@ fn serve_request(stream: TcpStream, fixture: &Fixture, started: Instant) {
     } else if request_line.contains("/log?") {
         match fixture.live_logs {
             Some(messages) => stream_logs(&stream, &request_line, messages, started),
-            None => respond(&stream, &fixture.logs),
+            None => {
+                let first = logs_read.lock().unwrap().insert(path.to_owned());
+                match &fixture.reconnect_logs {
+                    Some(logs) if !first => respond(&stream, logs),
+                    _ => respond(&stream, &fixture.logs),
+                }
+            }
         }
     } else if request_line.contains("/events") {
         respond(&stream, &fixture.events);
@@ -112,12 +127,14 @@ pub fn serve(fixture: Fixture) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());
     let fixture = Arc::new(fixture);
+    let logs_read = Arc::new(Mutex::new(HashSet::new()));
     let started = Instant::now();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             let fixture = fixture.clone();
-            thread::spawn(move || serve_request(stream, &fixture, started));
+            let logs_read = logs_read.clone();
+            thread::spawn(move || serve_request(stream, &fixture, &logs_read, started));
         }
     });
     server

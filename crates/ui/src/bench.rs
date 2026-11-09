@@ -3,7 +3,7 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
-use taffrail_core::Following;
+use taffrail_core::{Following, LogReader};
 
 use crate::root::Root;
 
@@ -18,6 +18,9 @@ const READY_POLL: Duration = Duration::from_millis(100);
 const SETTLE: Duration = Duration::from_secs(5);
 const STARTUP_LIMIT: Duration = Duration::from_secs(60);
 const LONGEST_VALID_FRAME: Duration = Duration::from_secs(1);
+/// Lines read at a time to check them, which bounds the memory the check takes.
+const CHECK_CHUNK: u64 = 65_536;
+const SEQ_FIELD: &str = "\"seq\": ";
 
 struct Run {
     root: Entity<Root>,
@@ -120,9 +123,46 @@ fn measure_next_frame(mut run: Run, window: &mut Window, _: &mut App) {
     });
 }
 
+/// Lines missing from the simulator's `seq` numbers, lines stored twice, and gap rows,
+/// counted per source across everything the tail holds.
+fn check_lines(reader: &LogReader, end: u64) -> (u64, u64, u64) {
+    let mut last = std::collections::HashMap::new();
+    let (mut lost, mut repeated, mut gaps) = (0, 0, 0);
+    for start in (0..end).step_by(CHECK_CHUNK as usize) {
+        for line in reader
+            .read(start..end.min(start + CHECK_CHUNK))
+            .unwrap_or_default()
+        {
+            if line.gap.is_some() {
+                gaps += 1;
+                continue;
+            }
+            let Some(seq) = seq(&line.text) else {
+                continue;
+            };
+            match last.insert(line.source, seq) {
+                Some(previous) if seq <= previous => repeated += 1,
+                Some(previous) => lost += seq - previous - 1,
+                None => {}
+            }
+        }
+    }
+    (lost, repeated, gaps)
+}
+
+fn seq(text: &str) -> Option<u64> {
+    let rest = &text[text.find(SEQ_FIELD)? + SEQ_FIELD.len()..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest[..digits].parse().ok()
+}
+
 /// Frame times, then how many containers a tail has streamed in all and how many pods it
-/// follows now, which shows pods joining and leaving during rollouts.
-fn report(mut intervals: Vec<Duration>, logs: Option<(usize, Option<Following>, u64)>) -> String {
+/// follows now, which shows pods joining and leaving during rollouts, and whether any line
+/// was lost or stored twice.
+fn report(
+    mut intervals: Vec<Duration>,
+    logs: Option<(usize, Option<Following>, u64, LogReader)>,
+) -> String {
     let frames = intervals.len();
     let over = |limit: u64| {
         intervals
@@ -133,14 +173,17 @@ fn report(mut intervals: Vec<Duration>, logs: Option<(usize, Option<Following>, 
     let (over_17ms, over_33ms) = (over(17), over(33));
     intervals.sort_unstable();
     let percentile = |percent: usize| intervals[(frames - 1) * percent / 100].as_secs_f64() * 1000.;
-    let logs = logs.map_or_else(String::new, |(sources, following, lines)| {
+    let logs = logs.map_or_else(String::new, |(sources, following, lines, reader)| {
+        let (lost, repeated, gaps) = check_lines(&reader, lines);
         let followed = following.map_or_else(String::new, |following| {
             format!(
                 r#","followed_pods":{},"matching_pods":{}"#,
                 following.pods, following.matching
             )
         });
-        format!(r#","log_sources":{sources},"log_lines":{lines}{followed}"#)
+        format!(
+            r#","log_sources":{sources},"log_lines":{lines},"log_lost":{lost},"log_repeated":{repeated},"log_gaps":{gaps}{followed}"#
+        )
     });
     format!(
         r#"{{"frames":{frames},"p50_ms":{:.2},"p95_ms":{:.2},"p99_ms":{:.2},"max_ms":{:.2},"over_17ms":{over_17ms},"over_33ms":{over_33ms}{logs}}}"#,

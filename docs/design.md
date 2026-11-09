@@ -83,7 +83,9 @@ The signature element is the log timeline, a strip above the log lines that show
 - The view follows the newest lines until you scroll up or press **Pause**. Lines keep being stored while paused, and the button then reads **Follow (1,240 new)**.
 - Filters narrow the lines. Search highlights matches and keeps the surrounding lines.
 - The timeline bars are stacked by severity. Click a bar to jump there, or press `n` for the next error.
-- A lost connection shows a marked gap in the lines, with the time range that may be missing.
+- When a stream ends, the tail reconnects after 2 seconds and resumes after the last stored line. It asks for lines since that line's second, then skips those already stored, so a line is neither lost nor shown twice.
+- A container that restarted is read from where its previous run was left, then from the new run's first line, up to 10,000 lines.
+- Lines that cannot be read again show as one muted row across the full width, with the source: **Lines may be missing from 10:42:06 to 10:42:31**. This happens when the log rotated while disconnected, more than 10,000 lines were missed, the previous run's log is gone, or the pod was deleted after a lost connection. The end time of a deleted pod is when Taffrail found it gone.
 
 ## Keyboard
 
