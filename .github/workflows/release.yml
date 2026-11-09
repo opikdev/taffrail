@@ -39,7 +39,9 @@ jobs:
           lipo -info target/universal-apple-darwin/release/taffrail
       - name: Write the licenses for the app's resources
         run: scripts/third-party-licenses.sh target/licenses/bundle aarch64-apple-darwin x86_64-apple-darwin
-      - run: cargo packager --release -p taffrail-ui --target universal-apple-darwin --formats app,dmg
+      - name: Package, retrying failed tool downloads
+        shell: bash
+        run: scripts/retry.sh cargo packager --release -p taffrail-ui --target universal-apple-darwin --formats app,dmg
       - name: Check the app is sealed and holds the licenses, in the bundle and in the disk image
         run: |
           check() {
@@ -82,7 +84,9 @@ jobs:
       - name: Write the licenses to install next to taffrail.exe
         shell: bash
         run: scripts/third-party-licenses.sh target/licenses/bundle x86_64-pc-windows-msvc
-      - run: cargo packager --release -p taffrail-ui --formats nsis,wix
+      - name: Package, retrying failed tool downloads
+        shell: bash
+        run: scripts/retry.sh cargo packager --release -p taffrail-ui --formats nsis,wix
       - name: Check both installers install with the licenses, and the app starts
         shell: pwsh
         run: |
@@ -143,7 +147,9 @@ jobs:
       - run: cargo build --release --locked -p taffrail-ui
       - name: Write the licenses for /usr/share/doc/taffrail and the archive
         run: scripts/third-party-licenses.sh target/licenses/linux x86_64-unknown-linux-gnu
-      - run: cargo packager --release -p taffrail-ui --formats deb,appimage
+      - name: Package, retrying failed tool downloads
+        shell: bash
+        run: scripts/retry.sh cargo packager --release -p taffrail-ui --formats deb,appimage
       - name: Archive the binary with the licenses
         run: |
           version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "taffrail-ui") | .version')"

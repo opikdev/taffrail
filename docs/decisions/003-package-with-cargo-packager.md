@@ -6,6 +6,6 @@
 - **Consequences**:
   - It is Apache-2.0 or MIT, and it runs only in CI, so it adds nothing to the app's dependencies.
   - It ad-hoc signs the Mac app, and can sign with a Developer ID later through the same config.
-  - It downloads NSIS, WiX and linuxdeploy at build time, so a release build needs the network.
+  - It downloads NSIS, WiX and linuxdeploy at build time, so a release build needs the network. Those downloads sometimes fail with a 5xx error, so the workflow runs it through `scripts/retry.sh`.
   - Its `resources` setting puts `LICENSE` and the third-party notices in the Mac app and the Windows install folder, but would also put them in `/usr/lib/taffrail` on Linux. So the Linux job writes them to another folder, and `deb.files` and `appimage.files` put them in `/usr/share/doc/taffrail`. See [Release Taffrail](../release.md).
   - It names the outputs and lays out the bundles. If that stops fitting, each format can move to its own tool without changing the app.
