@@ -9,8 +9,8 @@ Each milestone ends with `scripts/bench.sh` inside the [performance budget](#per
 | 1. Engine | Contexts, a live pod table and a merged log tail | Done |
 | 2. App shell | The layout, navigation and keyboard model everything else lives in | Done |
 | 3. Log explorer | Find a failure across pods without leaving the app | Next |
-| 4. Cluster coverage | Read every common resource, plus any custom resource | Planned |
-| 5. Version 0.1 | People can install it, trust it and update it | Planned |
+| 4. Workload coverage | Read the resources that logs come from, and see what you cannot read | Planned |
+| 5. Version 0.1 | People can install it and trust it | Planned |
 
 ## Milestone 2: App shell
 
@@ -39,20 +39,20 @@ Build this first, because every later feature depends on its layout.
 
 **Done when:** you can start from a failing Deployment and find its first error in a rollout, across 50 pods, at 10,000 lines per second.
 
-## Milestone 4: Cluster coverage
+## Milestone 4: Workload coverage
 
-- Show live tables for Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingresses, ConfigMaps, Secrets, Nodes, Namespaces and Events.
-- Discover custom resources, and show them in generic tables.
+- Show live tables for Deployments, StatefulSets, DaemonSets, Jobs, Nodes, Namespaces and Events.
 - Add owner links, such as from a Pod to its Deployment and its Node.
-- Keep Secret values hidden until revealed.
 - Show permission errors per resource, without failing the whole view.
 
 **Done when:** a user with limited permissions can browse a cluster and see plainly what they cannot read.
 
 ## Milestone 5: Version 0.1
 
-- Sign and notarize macOS builds, and sign Windows builds.
-- Add release builds, an update check and a changelog.
+- Build installers for macOS, Windows and Linux from a version tag, with release notes.
+- Ad-hoc sign the Mac app, and document how to open unsigned builds.
+- Find exec auth plugins and kubeconfig files when the app starts from the Dock or Start menu, not only from a terminal.
+- Add the install guide, privacy policy, issue forms and code of conduct.
 - Review accessibility: keyboard reach, focus order, screen reader labels and input methods.
 - Test on a real cluster, which the project owner provides.
 
@@ -64,6 +64,9 @@ Build this first, because every later feature depends on its layout.
 |---|---|
 | Edit, apply, scale, delete, restart | Needs a [decision record](decisions/002-read-only-with-no-telemetry.md) with a per-context write mode |
 | Shell into a container | Run `kubectl exec` in your own terminal |
+| Services, Ingresses, ConfigMaps, Secrets, CronJobs and custom resources | Version 0.2. Secret values stay hidden until revealed |
+| Signed builds | Windows signing through the SignPath Foundation after the first release. macOS notarization needs a paid Apple Developer membership |
+| Update check | Not in 0.1, so the app talks only to your clusters. Watch releases on GitHub instead |
 | Metrics charts | First candidate after 0.1 |
 | Helm, cluster maps, topology views | Revisit after 0.1 |
 | Extensions | Wait until the core API has settled |
