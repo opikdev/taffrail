@@ -2,7 +2,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -14,11 +16,17 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodSnapshot, SavedState,
+    Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodKey, PodSnapshot,
+    SavedState,
 };
 
-use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane};
+use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
 use crate::logs::{LogPane, dock_height};
+use crate::palette::{
+    CloseWindow, FocusFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
+    ReloadContexts, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext,
+    SwitchNamespace, TailSelection, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
+};
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
 use crate::windows;
@@ -26,7 +34,16 @@ use crate::windows;
 type ContextPicker = SelectState<Vec<String>>;
 type NamespacePicker = SelectState<SearchableVec<String>>;
 
-actions!(taffrail, [NextRow, PreviousRow, CloseDetails]);
+actions!(
+    taffrail,
+    [
+        NextRow,
+        PreviousRow,
+        CloseDetails,
+        ClearFilter,
+        CloseOverlay
+    ]
+);
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = taffrail, no_json)]
@@ -36,6 +53,27 @@ struct ToggleColumn {
 
 const KEY_CONTEXT: &str = "Taffrail";
 const TABLE_KEYS: &str = "Taffrail && !Input";
+const FILTER_CONTEXT: &str = "PodFilter";
+const OPEN_PALETTE_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-k"
+} else {
+    "ctrl-k"
+};
+const TOGGLE_SIDEBAR_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-b"
+} else {
+    "ctrl-b"
+};
+const CLOSE_WINDOW_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-w"
+} else {
+    "ctrl-w"
+};
+const SEARCH_HEIGHT: f32 = 26.;
+const PALETTE_WIDTH: f32 = 560.;
+const PALETTE_TOP: f32 = 96.;
+const PALETTE_HEIGHT: f32 = 380.;
+const SHORTCUTS_WIDTH: f32 = 420.;
 
 /// Binds the keys that act on the pod table when no text field has focus.
 pub fn init(cx: &mut App) {
@@ -45,6 +83,19 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("k", PreviousRow, Some(TABLE_KEYS)),
         KeyBinding::new("up", PreviousRow, Some(TABLE_KEYS)),
         KeyBinding::new("escape", CloseDetails, Some(TABLE_KEYS)),
+        KeyBinding::new("enter", OpenSelected, Some(TABLE_KEYS)),
+        KeyBinding::new("/", FocusFilter, Some(TABLE_KEYS)),
+        KeyBinding::new("l", TailSelection, Some(TABLE_KEYS)),
+        KeyBinding::new("s", ShowSummary, Some(TABLE_KEYS)),
+        KeyBinding::new("e", ShowEvents, Some(TABLE_KEYS)),
+        KeyBinding::new("y", ShowYaml, Some(TABLE_KEYS)),
+        KeyBinding::new("space", ToggleFollow, Some(TABLE_KEYS)),
+        KeyBinding::new("?", ShowShortcuts, Some(TABLE_KEYS)),
+        KeyBinding::new("shift-/", ShowShortcuts, Some(TABLE_KEYS)),
+        KeyBinding::new("escape", ClearFilter, Some(FILTER_CONTEXT)),
+        KeyBinding::new(OPEN_PALETTE_KEY, OpenPalette, Some(KEY_CONTEXT)),
+        KeyBinding::new(TOGGLE_SIDEBAR_KEY, ToggleSidebar, Some(KEY_CONTEXT)),
+        KeyBinding::new(CLOSE_WINDOW_KEY, CloseWindow, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -134,6 +185,8 @@ pub struct Root {
     connection: Option<Connection>,
     logs: Option<Entity<LogPane>>,
     details: Option<Entity<DetailsPane>>,
+    palette: Option<Entity<CommandState>>,
+    shortcuts_open: bool,
     focus_handle: FocusHandle,
     session: Session,
     sidebar_collapsed: bool,
@@ -163,12 +216,21 @@ impl Root {
                 .row_selectable(false)
         });
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter pods"));
-        let filter_events = cx.subscribe(&filter, |this, filter, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                let filter = filter.read(cx).value().to_string();
-                this.apply_filter(filter, cx);
-            }
-        });
+        let filter_events = cx.subscribe_in(
+            &filter,
+            window,
+            |this, filter, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let filter = filter.read(cx).value().to_string();
+                    this.apply_filter(filter, cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.focus_handle.focus(window, cx);
+                    this.open_selected(cx);
+                }
+                _ => {}
+            },
+        );
         let namespace_options = vec![ALL_NAMESPACES.to_owned()];
         let namespace_picker = cx.new(|cx| {
             let options = SearchableVec::new(namespace_options.clone());
@@ -219,6 +281,8 @@ impl Root {
             connection: None,
             logs: None,
             details: None,
+            palette: None,
+            shortcuts_open: false,
             focus_handle,
             session: Session::ChooseContext,
             sidebar_collapsed,
@@ -366,10 +430,15 @@ impl Root {
     }
 
     pub(crate) fn tail_logs(&mut self, cx: &mut Context<Self>) {
+        let targets = self.log_targets(cx);
+        self.start_tail(targets, cx);
+    }
+
+    fn start_tail(&mut self, targets: Vec<LogTarget>, cx: &mut Context<Self>) {
         let Some(connection) = &self.connection else {
             return;
         };
-        match self.backend.tail_logs(connection, self.log_targets(cx)) {
+        match self.backend.tail_logs(connection, targets) {
             Ok(tail) => self.logs = Some(cx.new(|cx| LogPane::new(tail, cx))),
             Err(error) => {
                 self.session = Session::Failed {
@@ -420,6 +489,93 @@ impl Root {
             pods.delegate_mut().clear_selection();
             cx.notify();
         });
+        cx.notify();
+    }
+
+    /// Opens the selected pod, or the first row if nothing is selected.
+    fn open_selected(&mut self, cx: &mut Context<Self>) {
+        if self.pods.read(cx).delegate().selected().is_some() {
+            self.open_details(cx);
+        } else {
+            self.move_selection(1, cx);
+        }
+    }
+
+    fn open_pod(&mut self, key: PodKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        let shown = self
+            .pods
+            .update(cx, |pods, _| pods.delegate_mut().select_key(key));
+        if shown.is_none() {
+            self.clear_filter(window, cx);
+            self.set_namespace(None, window, cx);
+            self.remember_state(window, cx);
+        }
+        self.pods.update(cx, |pods, cx| {
+            if let Some(row_ix) = pods.delegate().selected_row() {
+                pods.vertical_scroll_handle
+                    .scroll_to_item(row_ix, ScrollStrategy::Nearest);
+            }
+            cx.notify();
+        });
+        self.open_details(cx);
+    }
+
+    fn selected_context(&self, cx: &App) -> Option<String> {
+        self.picker
+            .as_ref()
+            .and_then(|picker| picker.read(cx).selected_value())
+            .cloned()
+    }
+
+    fn switch_context(&mut self, context: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.picker {
+            picker.update(cx, |picker, cx| {
+                picker.set_selected_value(&context, window, cx);
+            });
+        }
+        self.connect(context, window, cx);
+        self.remember_state(window, cx);
+    }
+
+    fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter
+            .update(cx, |filter, cx| filter.set_value("", window, cx));
+        self.apply_filter(String::new(), cx);
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let palette = cx.new(|cx| CommandState::new(window, cx));
+        palette.update(cx, |palette, cx| palette.focus(window, cx));
+        self.palette = Some(palette);
+        self.shortcuts_open = false;
+        cx.notify();
+    }
+
+    fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.shortcuts_open = false;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn show_tab(&mut self, tab: PaneTab, cx: &mut Context<Self>) {
+        if let Some(details) = &self.details {
+            details.update(cx, |details, cx| details.show_tab(tab, cx));
+        }
+    }
+
+    fn tail_selection(&mut self, cx: &mut Context<Self>) {
+        let selected = self.pods.read(cx).delegate().selection_targets();
+        match selected {
+            Some(targets) => self.start_tail(targets, cx),
+            None => self.tail_logs(cx),
+        }
+    }
+
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.remember_state(window, cx);
         cx.notify();
     }
 
@@ -563,11 +719,7 @@ impl Root {
                     self.connect(context.clone(), window, cx);
                 }
             }
-            NoticeAction::ClearFilter => {
-                self.filter
-                    .update(cx, |filter, cx| filter.set_value("", window, cx));
-                self.apply_filter(String::new(), cx);
-            }
+            NoticeAction::ClearFilter => self.clear_filter(window, cx),
             NoticeAction::ShowAllNamespaces => {
                 self.set_namespace(None, window, cx);
                 self.remember_state(window, cx);
@@ -683,9 +835,7 @@ impl Root {
                             .accessibility_label(toggle_label)
                             .tooltip(toggle_label)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.sidebar_collapsed = !this.sidebar_collapsed;
-                                this.remember_state(window, cx);
-                                cx.notify();
+                                this.toggle_sidebar(window, cx);
                             })),
                     )
                     .when_some(initial, |bar, initial| {
@@ -716,6 +866,70 @@ impl Root {
                         )
                     }),
             )
+            .child(
+                h_flex()
+                    .id("open-palette")
+                    .test_support()
+                    .role(Role::Button)
+                    .aria_label("Search or run a command")
+                    .mr_2()
+                    .h(px(SEARCH_HEIGHT))
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|pill| pill.bg(cx.theme().secondary_hover))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                    .child(Icon::new(IconName::Search).size_3())
+                    .child("Search or run a command")
+                    .child(PALETTE_KEY),
+            )
+    }
+
+    fn palette_source<'a>(&'a self, query: &'a str, cx: &'a App) -> PaletteSource<'a> {
+        let table = self.pods.read(cx).delegate();
+        PaletteSource {
+            query,
+            rows: &table.snapshot().rows,
+            contexts: self
+                .contexts
+                .as_ref()
+                .map(Contexts::names)
+                .unwrap_or_default(),
+            current_context: self.selected_context(cx),
+            namespaces: table.namespaces(),
+            namespace: table.namespace(),
+            has_selection: self.details.is_some(),
+            has_tail: self.logs.is_some(),
+            connected: self.connection.is_some(),
+        }
+    }
+
+    fn render_palette(
+        &self,
+        palette: &Entity<CommandState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let query = palette.read(cx).query(cx);
+        let entries = groups(self.palette_source(&query, cx));
+        let root = cx.entity();
+        let closing = root.clone();
+        let mut command = Command::new(palette)
+            .placeholder("Search pods or run a command")
+            .max_h(px(PALETTE_HEIGHT))
+            .empty(|_, _, _| div().p_4().text_sm().child("No matches"))
+            .on_query(move |_, _, cx| root.update(cx, |_, cx| cx.notify()))
+            .on_confirm(move |_, window, cx| {
+                closing.update(cx, |root, cx| root.close_overlays(window, cx));
+            });
+        for group in entries {
+            command = command.group(group);
+        }
+        render_overlay(PALETTE_WIDTH, command.into_any_element(), cx)
     }
 
     fn render_connection(&self, cx: &App) -> impl IntoElement + use<> {
@@ -781,13 +995,17 @@ impl Root {
                 ),
             )
             .child(
-                div().w(px(FILTER_WIDTH)).min_w(px(FILTER_MIN_WIDTH)).child(
-                    Input::new(&self.filter)
-                        .id("pod-filter")
-                        .small()
-                        .prefix(Icon::new(IconName::Search).small().text_color(muted))
-                        .aria_label("Filter pods"),
-                ),
+                div()
+                    .key_context(FILTER_CONTEXT)
+                    .w(px(FILTER_WIDTH))
+                    .min_w(px(FILTER_MIN_WIDTH))
+                    .child(
+                        Input::new(&self.filter)
+                            .id("pod-filter")
+                            .small()
+                            .prefix(Icon::new(IconName::Search).small().text_color(muted))
+                            .aria_label("Filter pods"),
+                    ),
             )
             .child(
                 div().flex_shrink_0().child(
@@ -920,6 +1138,43 @@ fn tail_label(pods: usize, matching: usize) -> String {
     }
 }
 
+/// A centred sheet over the window. Clicking outside it closes it.
+fn render_overlay(
+    width: f32,
+    content: AnyElement,
+    cx: &mut Context<Root>,
+) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    div()
+        .id("overlay")
+        .test_support()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .justify_center()
+        .items_start()
+        .pt(px(PALETTE_TOP))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, cx| this.close_overlays(window, cx)),
+        )
+        .child(
+            div()
+                .id("overlay-sheet")
+                .w(px(width))
+                .overflow_hidden()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(content),
+        )
+}
+
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let table = self.pods.read(cx).delegate();
@@ -946,11 +1201,84 @@ impl Render for Root {
         v_flex()
             .size_full()
             .id("root")
+            .relative()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
-            .on_action(cx.listener(|this, _: &CloseDetails, _, cx| this.close_details(cx)))
+            .on_action(cx.listener(|this, _: &CloseDetails, window, cx| {
+                if this.shortcuts_open {
+                    this.close_overlays(window, cx);
+                } else {
+                    this.close_details(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                this.close_overlays(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearFilter, window, cx| {
+                if this.filter.read(cx).value().is_empty() {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    this.clear_filter(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| this.open_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.open_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
+                this.close_overlays(window, cx);
+                this.shortcuts_open = true;
+            }))
+            .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
+                this.close_overlays(window, cx);
+                this.filter.focus_handle(cx).focus(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TailSelection, window, cx| {
+                this.close_overlays(window, cx);
+                this.tail_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSummary, window, cx| {
+                this.close_overlays(window, cx);
+                this.show_tab(PaneTab::Summary, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowEvents, window, cx| {
+                this.close_overlays(window, cx);
+                this.show_tab(PaneTab::Events, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowYaml, window, cx| {
+                this.close_overlays(window, cx);
+                this.show_tab(PaneTab::Yaml, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFollow, window, cx| {
+                this.close_overlays(window, cx);
+                if let Some(logs) = &this.logs {
+                    logs.update(cx, |logs, cx| logs.toggle_following(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.close_overlays(window, cx);
+                this.toggle_sidebar(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReloadContexts, window, cx| {
+                this.close_overlays(window, cx);
+                this.load_contexts(Contexts::load(), window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
+            .on_action(cx.listener(|this, action: &SwitchContext, window, cx| {
+                this.close_overlays(window, cx);
+                this.switch_context(action.name.to_string(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &SwitchNamespace, window, cx| {
+                this.close_overlays(window, cx);
+                let namespace = action.namespace.as_ref().map(ToString::to_string);
+                this.set_namespace(namespace, window, cx);
+                this.remember_state(window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &OpenPod, window, cx| {
+                this.open_pod(action.key.clone(), window, cx);
+            }))
             .on_action(cx.listener(|this, action: &ToggleColumn, window, cx| {
                 this.toggle_column(action.name, cx);
                 this.remember_state(window, cx);
@@ -958,6 +1286,13 @@ impl Render for Root {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .child(title_bar)
+            .when_some(self.palette.clone(), |root, palette| {
+                root.child(deferred(self.render_palette(&palette, cx)).priority(1))
+            })
+            .when(self.shortcuts_open, |root| {
+                let shortcuts = render_shortcuts(cx).into_any_element();
+                root.child(deferred(render_overlay(SHORTCUTS_WIDTH, shortcuts, cx)).priority(1))
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -1017,7 +1352,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{Root, distinct_pods, no_rows_notice, pod_status, tail_label};
+    use super::{OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice, pod_status, tail_label};
     use crate::fake_api::{Fixture, kubeconfig, serve};
     use crate::pods::PodTable;
 
@@ -1405,6 +1740,161 @@ users:
             let state = root.read(cx).saved_state(window, cx);
             assert_eq!(state.namespace.as_deref(), Some("web"));
             assert_eq!(state.hidden_columns, ["Node"]);
+        })
+        .unwrap();
+    }
+
+    async fn connected(cx: &mut TestAppContext) -> AnyWindowHandle {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_pods(TWO_NAMESPACES_BODY), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+        handle
+    }
+
+    #[gpui_kit::test]
+    async fn the_palette_finds_a_pod_and_opens_it(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            window.input("front", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_none());
+            assert_eq!(window.find("details-title").label(), Some("front-1"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn escape_leaves_the_palette_without_acting(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_some());
+            window.input("nothing", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_some());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_none());
+            assert!(window.try_find("details").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_pod_is_reachable_from_the_keyboard_alone(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("/", cx);
+            window.input("front", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("details-title").is_some()
+                && !window.find_all_by_label("Events 1").is_empty()
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("y", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("copy-yaml").is_some());
+            window.press("e", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("copy-yaml").is_none());
+            window.press("l", cx);
+        })
+        .unwrap();
+
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("log-mode").is_some()
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(window.find("log-mode").label(), Some("Pause"));
+            window.press("space", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Follow"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn escape_clears_the_filter_and_then_closes_the_panel(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("j", cx);
+            window.render_frame(cx);
+            window.press("/", cx);
+            window.input("front", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find_all_by_label("api-1").len() <= 1);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_some());
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+            assert!(!window.find_all_by_label("api-1").is_empty());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_question_mark_lists_every_shortcut(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("?", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("shortcuts").is_some());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("shortcuts").is_none());
         })
         .unwrap();
     }

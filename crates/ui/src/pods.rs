@@ -207,6 +207,27 @@ impl PodTable {
         self.selected.as_ref()
     }
 
+    /// Selects a pod by identity. Returns its row, or `None` if filters are hiding it.
+    pub fn select_key(&mut self, key: PodKey) -> Option<usize> {
+        self.selected = Some(key);
+        self.rebuild();
+        self.selected_row
+    }
+
+    pub fn selected_row(&self) -> Option<usize> {
+        self.selected_row
+    }
+
+    pub fn namespaces(&self) -> Vec<&str> {
+        namespaces(&self.snapshot).collect()
+    }
+
+    /// What a tail of the selection would follow.
+    pub fn selection_targets(&self) -> Option<Vec<LogTarget>> {
+        let key = self.selected.as_ref()?;
+        Some(log_targets(self.snapshot.find(key)))
+    }
+
     pub fn clear_selection(&mut self) {
         self.selected = None;
         self.selected_row = None;
@@ -280,7 +301,7 @@ fn ready_counts(ready: &str) -> (u32, u32) {
     (ready.parse().unwrap_or(0), total.parse().unwrap_or(0))
 }
 
-fn urgency(row: &PodRow) -> u8 {
+pub fn urgency(row: &PodRow) -> u8 {
     status_tone(&row.status).urgency()
 }
 

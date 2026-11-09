@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui_kit::*;
 use taffrail_core::{APP_NAME, Backend, ClusterError, Contexts, SavedState, WindowRect};
 
+use crate::palette::CloseWindow;
 use crate::root::{self, Root};
 
 actions!(taffrail, [NewWindow, Quit]);
@@ -55,7 +56,10 @@ pub fn init(
     });
     cx.set_menus([
         Menu::new(APP_NAME).items([MenuItem::action(format!("Quit {APP_NAME}"), Quit)]),
-        Menu::new("File").items([MenuItem::action("New window", NewWindow)]),
+        Menu::new("File").items([
+            MenuItem::action("New window", NewWindow),
+            MenuItem::action("Close window", CloseWindow),
+        ]),
     ]);
     let Some(path) = state_path else {
         return SavedState::default();

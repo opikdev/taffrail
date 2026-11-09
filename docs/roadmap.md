@@ -7,8 +7,8 @@ Each milestone ends with `scripts/bench.sh` inside the [performance budget](#per
 | Milestone | Outcome | Status |
 |---|---|---|
 | 1. Engine | Contexts, a live pod table and a merged log tail | Done |
-| 2. App shell | The layout, navigation and keyboard model everything else lives in | Next |
-| 3. Log explorer | Find a failure across pods without leaving the app | Planned |
+| 2. App shell | The layout, navigation and keyboard model everything else lives in | Done |
+| 3. Log explorer | Find a failure across pods without leaving the app | Next |
 | 4. Cluster coverage | Read every common resource, plus any custom resource | Planned |
 | 5. Version 0.1 | People can install it, trust it and update it | Planned |
 

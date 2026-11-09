@@ -64,6 +64,10 @@ impl LogPane {
         self.progress.first..self.progress.end
     }
 
+    pub fn toggle_following(&mut self, cx: &mut Context<Self>) {
+        self.set_following(!self.following, cx);
+    }
+
     fn set_following(&mut self, following: bool, cx: &mut Context<Self>) {
         self.following = following;
         cx.notify();

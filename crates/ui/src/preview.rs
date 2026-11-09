@@ -387,6 +387,36 @@ pub fn run(directory: PathBuf) {
         .expect("preview window closed");
     details.save(&directory, "details-yaml-dark.png");
 
+    let mut palette = connected(&server, ThemeMode::Dark);
+    let handle = palette.handle;
+    palette
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-palette", cx);
+        })
+        .expect("preview window closed");
+    palette.save(&directory, "palette-dark.png");
+    palette
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("checkout", cx);
+        })
+        .expect("preview window closed");
+    palette.save(&directory, "palette-search-dark.png");
+
+    let mut shortcuts = connected(&server, ThemeMode::Light);
+    let handle = shortcuts.handle;
+    shortcuts
+        .cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("?", cx);
+        })
+        .expect("preview window closed");
+    shortcuts.save(&directory, "shortcuts-light.png");
+
     let mut picker = connected(&server, ThemeMode::Dark);
     let handle = picker.handle;
     picker

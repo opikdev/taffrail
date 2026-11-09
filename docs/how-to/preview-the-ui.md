@@ -15,6 +15,8 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `logs-dark.png`, `logs-light.png` | The pod table with a log tail |
 | `pods-dark.png` | The pod table alone |
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
+| `palette-dark.png`, `palette-search-dark.png` | The command palette, empty and searching |
+| `shortcuts-light.png` | The shortcut sheet |
 | `collapsed-light.png` | The sidebar collapsed to its icon rail |
 | `context-menu-dark.png` | The context picker, open |
 | `namespace-dark.png`, `namespace-menu-dark.png` | The pod table filtered to one namespace, and the namespace picker open |
