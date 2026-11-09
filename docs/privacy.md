@@ -28,7 +28,7 @@ Taffrail contacts nothing else.
 
 ## Remove everything
 
-Taffrail has no installer yet. To remove it, delete the folder you built it in, then delete the `taffrail` folder that holds its state file:
+First uninstall the app as [Install Taffrail](install.md#uninstall) describes, or delete the folder you built it in. Uninstalling leaves the state file behind, so then delete the `taffrail` folder that holds it:
 
 - macOS: `~/Library/Application Support/taffrail`
 - Windows: `%APPDATA%\taffrail`
