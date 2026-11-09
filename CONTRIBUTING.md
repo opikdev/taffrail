@@ -1,6 +1,6 @@
 # Contributing
 
-Read [AGENTS.md](AGENTS.md) first. Its rules apply to people and agents alike.
+Read [AGENTS.md](AGENTS.md) first. Its rules apply to people and agents alike. Everyone who takes part follows the [Code of conduct](CODE_OF_CONDUCT.md).
 
 ## Set up
 

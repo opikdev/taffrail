@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in Taffrail doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Leave out anything private.** Never paste tokens, certificates, kubeconfig contents, cluster addresses, or the names of private clusters, namespaces, or pods. Replace them with placeholders such as `my-cluster`.
+  - type: input
+    id: version
+    attributes:
+      label: Taffrail version or commit
+      description: There are no releases yet, so give the commit you built, from `git rev-parse --short HEAD`
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: kubernetes
+    attributes:
+      label: Kubernetes version and provider
+      description: Such as 1.35 on EKS, GKE, AKS, kind, or k3s
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: The steps that lead to the problem, one per line
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened, and what you expected
+      description: Include any message Taffrail showed, with private names replaced
+    validations:
+      required: true

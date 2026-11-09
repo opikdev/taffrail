@@ -1,0 +1,20 @@
+name: Feature request
+description: Something you'd like Taffrail to do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [the roadmap](https://github.com/opikdev/taffrail/blob/main/docs/roadmap.md) first. It lists what is planned and what is out of scope.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you're trying to do
+      description: The task or question, and the kind of cluster or workload it's about
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How you do it today
+      description: What you tried in Taffrail, or what you use instead
