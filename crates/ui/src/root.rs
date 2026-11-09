@@ -746,7 +746,7 @@ impl Root {
         match &self.session {
             Session::NoClusters { error } => {
                 let detail = error.clone().unwrap_or_else(|| {
-                    "Taffrail reads ~/.kube/config and KUBECONFIG. Add a cluster with your provider's CLI, then reload.".into()
+                    "Taffrail reads KUBECONFIG from your shell, or ~/.kube/config. Add a cluster with your provider's CLI, then reload.".into()
                 });
                 Some(
                     Notice::new("No clusters found")

@@ -110,7 +110,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 
 | State | What the user sees |
 |---|---|
-| No kubeconfig | **No clusters found.** Taffrail reads `~/.kube/config` and `KUBECONFIG`. Add a cluster with your provider's CLI, then press **Reload contexts**. |
+| No kubeconfig | **No clusters found.** Taffrail reads `KUBECONFIG` from your shell, or `~/.kube/config`. Add a cluster with your provider's CLI, then press **Reload contexts**. |
 | Connecting | **Connecting to staging.** The sidebar footer shows **Connecting**. |
 | Can't connect | **Can't reach staging**, with the error and **Try again**. |
 | Login needed | **Waiting for login to staging.** Finish signing in in your browser or terminal. |
@@ -121,6 +121,8 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |
 | Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the log dock. |
 | Secret hidden | `••••••••` with **Reveal value**. Values hide again when you leave the object. |
+
+On macOS and Linux, an app opened from the Dock, Finder or a desktop launcher misses the shell's `PATH` and `KUBECONFIG`. When Taffrail does not start in a terminal, it reads them from your login shell once at start-up, along with the proxy and cloud CLI variables that exec auth plugins such as `aws`, `gke-gcloud-auth-plugin` and `kubelogin` read. It waits five seconds at most, and keeps its own environment if the shell fails. On Windows, the Start menu already passes your user environment.
 
 ## Words
 

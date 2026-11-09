@@ -25,6 +25,7 @@ fn main() {
         preview::run(directory.into());
         return;
     }
+    taffrail_core::use_login_shell_environment();
     let backend = Arc::new(Backend::new().expect("failed to start the cluster runtime"));
     gpui_kit::application()
         .with_assets(AllAssets)

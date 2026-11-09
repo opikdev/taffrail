@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use kube::config::{KubeConfigOptions, Kubeconfig, KubeconfigError};
@@ -7,6 +9,7 @@ use kube::{Client, Config};
 use tokio::runtime::{self, Runtime};
 
 use crate::details::{self, PodDetails};
+use crate::environment::{self, ShellEnvironment};
 use crate::logs::{self, LogTail, LogTarget};
 use crate::pods::{self, PodWatch};
 
@@ -45,10 +48,15 @@ pub struct Contexts {
 }
 
 impl Contexts {
-    /// Reads `KUBECONFIG`, falling back to `~/.kube/config`.
+    /// Reads `KUBECONFIG`, falling back to `~/.kube/config`. Outside a terminal, both
+    /// `KUBECONFIG` and the environment exec plugins see come from the login shell.
     pub fn load() -> Result<Self, ClusterError> {
-        Kubeconfig::read()
-            .map(|kubeconfig| Self { kubeconfig })
+        Self::load_in(environment::login_shell())
+    }
+
+    fn load_in(environment: &ShellEnvironment) -> Result<Self, ClusterError> {
+        read_kubeconfig(environment)
+            .map(|kubeconfig| Self { kubeconfig }.with_environment(environment))
             .map_err(ClusterError::ReadKubeconfig)
     }
 
@@ -88,6 +96,33 @@ impl Contexts {
             .or_else(|| self.current())
     }
 
+    /// Passes `environment` to every exec plugin. A variable the kubeconfig sets for a
+    /// plugin keeps its value, because the plugin's own `env` entries come later.
+    fn with_environment(mut self, environment: &ShellEnvironment) -> Self {
+        let shell: Vec<HashMap<String, String>> = environment
+            .iter()
+            .map(|(name, value)| {
+                HashMap::from([
+                    ("name".to_owned(), name.to_owned()),
+                    ("value".to_owned(), value.to_owned()),
+                ])
+            })
+            .collect();
+        if shell.is_empty() {
+            return self;
+        }
+        let execs = self
+            .kubeconfig
+            .auth_infos
+            .iter_mut()
+            .filter_map(|named| named.auth_info.as_mut()?.exec.as_mut());
+        for exec in execs {
+            let own = exec.env.take().unwrap_or_default();
+            exec.env = Some(shell.iter().cloned().chain(own).collect());
+        }
+        self
+    }
+
     async fn connect(self, context: String) -> Result<Connection, ClusterError> {
         let options = KubeConfigOptions {
             context: Some(context.clone()),
@@ -117,6 +152,26 @@ impl Contexts {
             client,
         })
     }
+}
+
+/// Merges the files in the login shell's `KUBECONFIG`, if it set one, the way `kubectl` does.
+fn read_kubeconfig(environment: &ShellEnvironment) -> Result<Kubeconfig, KubeconfigError> {
+    let paths: Vec<PathBuf> = environment
+        .get("KUBECONFIG")
+        .map(|value| {
+            std::env::split_paths(value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Kubeconfig::read();
+    }
+    paths
+        .iter()
+        .try_fold(Kubeconfig::default(), |merged, path| {
+            Kubeconfig::read_from(path).and_then(|next| merged.merge(next))
+        })
 }
 
 /// A context that answered a request.
@@ -346,6 +401,66 @@ users:
         let request = served.await.unwrap().to_lowercase();
         assert!(
             request.contains("authorization: bearer exec-token"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn loads_the_kubeconfig_files_the_login_shell_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::write(&first, kubeconfig("http://127.0.0.1:1", "{}")).unwrap();
+        std::fs::write(
+            &second,
+            kubeconfig("http://127.0.0.1:2", "{}").replace("broken", "other"),
+        )
+        .unwrap();
+        let paths = std::env::join_paths([&first, &second]).unwrap();
+        let environment = ShellEnvironment::from_pairs([("KUBECONFIG", paths.to_str().unwrap())]);
+
+        let contexts = Contexts::load_in(&environment).unwrap();
+
+        assert_eq!(contexts.names(), ["dev", "broken", "other"]);
+        assert_eq!(contexts.current(), Some("dev"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_plugins_see_the_login_shell_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/bin/sh", directory.path().join("taffrail-test-plugin"))
+            .unwrap();
+        let path = format!("{}:/usr/bin:/bin", directory.path().display());
+        let environment = ShellEnvironment::from_pairs([
+            ("PATH", path.as_str()),
+            ("AWS_REGION", "shell-region"),
+            ("AWS_PROFILE", "shell-profile"),
+        ]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let exec = r#"
+      exec:
+        apiVersion: client.authentication.k8s.io/v1
+        command: taffrail-test-plugin
+        args:
+          - -c
+          - 'echo "{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{\"token\":\"$AWS_REGION-$AWS_PROFILE\"}}"'
+        env:
+          - name: AWS_PROFILE
+            value: kubeconfig-profile
+        interactiveMode: Never
+"#;
+        let contexts = Contexts::from_yaml(&kubeconfig(&server, exec))
+            .unwrap()
+            .with_environment(&environment);
+        let served = tokio::spawn(serve_version(listener));
+
+        contexts.connect("dev".into()).await.unwrap();
+
+        let request = served.await.unwrap().to_lowercase();
+        assert!(
+            request.contains("authorization: bearer shell-region-kubeconfig-profile"),
             "{request}"
         );
     }
