@@ -13,11 +13,14 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, Theme, h_flex, 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    FilterError, FilterProgress, Following, Gap, Level, LogFilter, LogFilterScan, LogLine,
-    LogProgress, LogReader, LogTail, Severity, TimelineView, json_line,
+    CONTEXT_SEPARATOR, ExportProgress, FilterError, FilterProgress, Following, Gap, Level,
+    LogExport, LogFilter, LogFilterScan, LogLine, LogProgress, LogReader, LogTail, Severity,
+    TimelineView, export_directory, json_line,
 };
 
+use crate::palette::ExportLines;
 use crate::pods::format_count;
+use crate::rows::{BlockCache, Row, RowId, RowKind, Rows};
 use crate::timeline::{
     BARS_HEIGHT, LOG_TIMELINE_CONTEXT, TIMELINE_HEIGHT, TimelineNext, TimelinePrevious, axis_time,
     bucket_label, duration_label, level_color, max_buckets, next_bucket, segment_heights,
@@ -34,18 +37,31 @@ const DOCK_SHARE: f32 = 0.42;
 const MINIMUM_DOCK_HEIGHT: f32 = 160.;
 const FILTER_WIDTH: f32 = 220.;
 const FILTER_MIN_WIDTH: f32 = 96.;
+const COMPACT_FILTER_WIDTH: f32 = 120.;
 const SEVERITY_PICKER_WIDTH: f32 = 136.;
 const NOTICE_WIDTH: f32 = 420.;
 /// Room left of the log dock for the sidebar and the panel's inset, used to size the
 /// timeline before its first paint.
 const DOCK_INSET: f32 = 240.;
-/// Below this window width the timeline's legend leaves out the bar length.
-const COMPACT_LEGEND_BELOW: f32 = 920.;
+/// Below this window width the dock header drops its title and narrows its controls,
+/// and the timeline's legend leaves out the bar length, so both fit the 760 px minimum.
+const COMPACT_DOCK_BELOW: f32 = 920.;
 const SWATCH_SIZE: f32 = 8.;
 /// The accent edge of the line that `n` or `Shift+N` found.
 const MARK_WIDTH: f32 = 2.;
+/// The column that marks matched lines while context shows.
+const MATCH_MARK_WIDTH: f32 = 8.;
+const CONTEXT_PICKER_WIDTH: f32 = 148.;
+const COMPACT_CONTEXT_PICKER_WIDTH: f32 = 92.;
+const COMPACT_SEVERITY_PICKER_WIDTH: f32 = 116.;
+/// The most lines one copy puts on the clipboard. An export has no limit.
+const MAX_COPY_LINES: usize = 100_000;
+/// The file name the save dialog suggests for an export.
+const EXPORT_NAME: &str = "taffrail-logs.log";
 /// The key context around the log filter field, where `Esc` clears it.
 pub const LOG_FILTER_CONTEXT: &str = "LogFilter";
+/// The key context of the focused log lines, where arrows move the selection.
+pub const LOG_LINES_CONTEXT: &str = "LogLines";
 
 /// The choices of the severity picker, lowest first.
 pub const SEVERITY_CHOICES: [(&str, Severity); 4] = [
@@ -56,6 +72,19 @@ pub const SEVERITY_CHOICES: [(&str, Severity); 4] = [
 ];
 
 pub type SeverityPicker = SelectState<Vec<&'static str>>;
+
+/// The choices of the context picker: how many lines of a match's source show around it.
+pub const CONTEXT_CHOICES: [(&str, usize); 3] = [("None", 0), ("3 lines", 3), ("10 lines", 10)];
+
+pub type LineContextPicker = SelectState<Vec<&'static str>>;
+
+/// The number of lines a context picker choice stands for.
+pub fn chosen_context(choice: Option<&&'static str>) -> usize {
+    CONTEXT_CHOICES
+        .iter()
+        .find(|(label, _)| Some(label) == choice)
+        .map_or(0, |(_, lines)| *lines)
+}
 
 /// The severity a picker choice stands for.
 pub fn chosen_severity(choice: Option<&&'static str>) -> Severity {
@@ -70,9 +99,48 @@ pub fn chosen_severity(choice: Option<&&'static str>) -> Severity {
 pub struct LogControls {
     pub query: Entity<InputState>,
     pub severity: Entity<SeverityPicker>,
+    pub context: Entity<LineContextPicker>,
 }
 
-actions!(taffrail, [ResetLogFilter]);
+actions!(
+    taffrail,
+    [
+        ResetLogFilter,
+        SelectNextLine,
+        SelectPreviousLine,
+        ExtendNextLine,
+        ExtendPreviousLine,
+        ClearLineSelection
+    ]
+);
+
+/// Selected rows, from `anchor` to `head`. The head moves with the arrow keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    anchor: RowId,
+    head: RowId,
+    /// The line at the head, which `n` and `Shift+N` look from.
+    head_seq: u64,
+}
+
+impl Selection {
+    fn single(id: RowId, seq: u64) -> Self {
+        Self {
+            anchor: id,
+            head: id,
+            head_seq: seq,
+        }
+    }
+
+    fn range(&self) -> (RowId, RowId) {
+        (self.anchor.min(self.head), self.anchor.max(self.head))
+    }
+
+    fn contains(&self, id: RowId) -> bool {
+        let (first, last) = self.range();
+        (first..=last).contains(&id)
+    }
+}
 
 /// A filter and the scan that finds its lines.
 struct ActiveFilter {
@@ -94,22 +162,27 @@ pub fn dock_height(window_height: Pixels) -> Pixels {
 pub struct LogPane {
     reader: LogReader,
     progress: LogProgress,
-    /// The first line in view. With a filter, the first matching line in view.
-    top: u64,
+    /// The first row in view.
+    top: RowId,
     following: bool,
     scrolled_lines: f32,
     note: Option<SharedString>,
     controls: LogControls,
     filter: Option<ActiveFilter>,
-    /// Lines in view at the last render, and how many rows fit.
-    visible: Range<u64>,
+    /// The first and last lines in view at the last render, and how many rows fit.
+    visible: Option<(u64, u64)>,
     rows: u64,
     /// The time of the line the view is at, for the timeline to mark.
     view_time: Option<i64>,
-    /// The line that `n` or `Shift+N` last found.
-    marked: Option<u64>,
-    /// Says why `n` or `Shift+N` found nothing, until the view moves.
+    selection: Option<Selection>,
+    /// Lines of a match's source shown around it, while a filter is on.
+    context: usize,
+    blocks: BlockCache,
+    lines_focus: FocusHandle,
+    /// Says what `n`, a copy or an export did, until the view moves.
     hint: Option<SharedString>,
+    /// The save dialog, then the export it starts. Dropping it stops the export.
+    export: Option<Task<()>>,
     timeline: TimelineView,
     /// Set when lines or matches change, so the bars are counted again.
     timeline_stale: bool,
@@ -135,6 +208,7 @@ impl LogPane {
                 let updated = this.update(cx, |this, cx| {
                     this.progress = progress;
                     this.timeline_stale = true;
+                    this.blocks.clear();
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -146,17 +220,21 @@ impl LogPane {
         let mut pane = Self {
             reader,
             progress: LogProgress::default(),
-            top: 0,
+            top: RowId::default(),
             following: true,
             scrolled_lines: 0.,
             note: None,
             controls,
             filter: None,
-            visible: 0..0,
+            visible: None,
             rows: 0,
             view_time: None,
-            marked: None,
+            selection: None,
+            context: 0,
+            blocks: BlockCache::default(),
+            lines_focus: cx.focus_handle().tab_stop(true),
             hint: None,
+            export: None,
             timeline: TimelineView::default(),
             timeline_stale: true,
             timeline_buckets: 0,
@@ -178,6 +256,8 @@ impl LogPane {
         }
         self.timeline_stale = true;
         self.hint = None;
+        self.selection = None;
+        self.blocks.clear();
         if filter.is_empty() {
             self.filter = None;
             cx.notify();
@@ -197,6 +277,7 @@ impl LogPane {
                             active.progress = progress;
                         }
                         this.timeline_stale = true;
+                        this.blocks.clear();
                         cx.notify();
                     });
                     if updated.is_err() {
@@ -212,6 +293,17 @@ impl LogPane {
             progress,
             _updates: updates,
         });
+        cx.notify();
+    }
+
+    /// Shows `lines` lines of each match's source around it, while a filter is on.
+    pub fn set_context(&mut self, lines: usize, cx: &mut Context<Self>) {
+        if self.context == lines {
+            return;
+        }
+        self.context = lines;
+        self.selection = None;
+        self.blocks.clear();
         cx.notify();
     }
 
@@ -244,7 +336,7 @@ impl LogPane {
         self.following = following;
         self.hint = None;
         if following {
-            self.marked = None;
+            self.selection = None;
             self.cursor = None;
         }
         cx.notify();
@@ -255,30 +347,39 @@ impl LogPane {
         self.filter.as_ref().map(|active| active.scan.as_ref())
     }
 
-    /// Holds the view still with `seq` at the top, or `above` lines below the top.
-    fn show_line(&mut self, seq: u64, above: u64) {
-        self.following = false;
-        self.top = match self.scan() {
-            Some(Ok(scan)) => {
-                let position = scan.position_of(seq).saturating_sub(above as usize);
-                scan.seqs(position..position + 1)
-                    .first()
-                    .copied()
-                    .unwrap_or(seq)
-            }
-            Some(Err(_)) => seq,
-            None => seq.saturating_sub(above).max(self.progress.first),
-        };
+    /// What the dock shows now.
+    fn rows(&mut self) -> Rows<'_> {
+        let held = self.progress.first..self.progress.end;
+        match self.filter.as_ref().map(|active| &active.scan) {
+            None => Rows::All {
+                reader: &self.reader,
+                held,
+            },
+            Some(Err(_)) => Rows::Nothing,
+            Some(Ok(scan)) if self.context == 0 => Rows::Matches(scan),
+            Some(Ok(scan)) => Rows::Context {
+                scan,
+                lines: self.context,
+                cache: &mut self.blocks,
+            },
+        }
     }
 
-    /// Moves to the next error, or the previous one, that the filter shows. With no error
-    /// found yet, it looks from the lines in view, including them.
+    /// Holds the view still with the row `id`, `above` rows below the top.
+    fn show_row(&mut self, id: RowId, above: u64) {
+        self.following = false;
+        self.top = self.rows().step(id, -(above as i64)).unwrap_or(id);
+    }
+
+    /// Moves to the next error, or the previous one, that the filter shows, and selects
+    /// it. With nothing selected, it looks from the lines in view, including them.
     pub fn jump_to_error(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let from = match (self.marked, forward) {
-            (Some(marked), true) => marked + 1,
-            (Some(marked), false) => marked,
-            (None, true) => self.visible.start,
-            (None, false) => self.visible.end,
+        let from = match (self.selection, self.visible, forward) {
+            (Some(selection), _, true) => selection.head_seq + 1,
+            (Some(selection), _, false) => selection.head_seq,
+            (None, Some((first, _)), true) => first,
+            (None, Some((_, last)), false) => last + 1,
+            (None, None, _) => self.progress.end,
         };
         let found = match self.scan() {
             Some(Ok(scan)) if forward => scan.next_error(from),
@@ -289,10 +390,11 @@ impl LogPane {
         };
         match found {
             Some(seq) => {
-                self.marked = Some(seq);
+                let id = self.rows().row_of(seq).unwrap_or(RowId::line(seq));
+                self.selection = Some(Selection::single(id, seq));
                 self.cursor = None;
                 self.hint = None;
-                self.show_line(seq, self.rows / 3);
+                self.show_row(id, self.rows / 3);
             }
             None => {
                 let hint = match (forward, self.filter.is_some()) {
@@ -307,6 +409,191 @@ impl LogPane {
         cx.notify();
     }
 
+    /// Selects the row `id`, or extends the selection to it, and pauses following.
+    fn select_row(&mut self, id: RowId, seq: u64, extend: bool, cx: &mut Context<Self>) {
+        self.selection = Some(match self.selection {
+            Some(selection) if extend => Selection {
+                head: id,
+                head_seq: seq,
+                ..selection
+            },
+            _ => Selection::single(id, seq),
+        });
+        self.following = false;
+        self.hint = None;
+        cx.notify();
+    }
+
+    /// Moves the selection's head by `delta` rows, past separators, and keeps it in view.
+    fn move_selection(&mut self, delta: i64, extend: bool, cx: &mut Context<Self>) {
+        let rows = self.rows;
+        let (start, start_seq) = match self.selection {
+            Some(selection) => (selection.head, selection.head_seq),
+            None => {
+                // The first arrow selects a line at the edge of the view it points into.
+                let Ok(view) = self.visible_rows(rows) else {
+                    return;
+                };
+                let edge = if delta > 0 {
+                    view.iter().find_map(|row| Some((row.id, row.line()?.seq)))
+                } else {
+                    view.iter()
+                        .rev()
+                        .find_map(|row| Some((row.id, row.line()?.seq)))
+                };
+                if let Some((id, seq)) = edge {
+                    self.select_row(id, seq, false, cx);
+                }
+                return;
+            }
+        };
+        let mut id = start;
+        let mut seq = start_seq;
+        let mut target = self.rows().step(start, delta).unwrap_or(start);
+        // A separator is not a line, so the head steps over it.
+        for _ in 0..2 {
+            let row = self
+                .rows()
+                .from(target, 1)
+                .ok()
+                .and_then(|rows| rows.into_iter().next());
+            match row {
+                Some(Row {
+                    id: found,
+                    kind: RowKind::Line { line, .. },
+                }) => {
+                    id = found;
+                    seq = line.seq;
+                    break;
+                }
+                Some(_) => {
+                    let next = self.rows().step(target, delta.signum()).unwrap_or(target);
+                    if next == target {
+                        break;
+                    }
+                    target = next;
+                }
+                None => break,
+            }
+        }
+        self.select_row(id, seq, extend, cx);
+        self.keep_in_view(id);
+    }
+
+    /// Scrolls just enough to show the row `id`.
+    fn keep_in_view(&mut self, id: RowId) {
+        let rows = self.rows.max(1);
+        if id < self.top {
+            self.top = id;
+            return;
+        }
+        let top = self.top;
+        let bottom = self.rows().step(top, rows as i64 - 1).unwrap_or(top);
+        if id > bottom {
+            self.top = self.rows().step(id, -(rows as i64 - 1)).unwrap_or(id);
+        }
+    }
+
+    fn clear_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.take().is_none() {
+            window.blur(cx);
+        }
+        cx.notify();
+    }
+
+    /// Copies the selected lines as they are stored, each after its source, as
+    /// `kubectl logs --prefix --timestamps` prints them.
+    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            self.hint = Some("Select lines to copy them".into());
+            cx.notify();
+            return;
+        };
+        let (first, last) = selection.range();
+        let rows = self.rows().between(first, last, MAX_COPY_LINES + 1);
+        let mut rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.hint = Some(format!("Failed to read log lines: {error}").into());
+                cx.notify();
+                return;
+            }
+        };
+        let cut = rows.len() > MAX_COPY_LINES;
+        rows.truncate(MAX_COPY_LINES);
+        let mut lines = 0;
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| match &row.kind {
+                RowKind::Line { line, .. } => {
+                    lines += 1;
+                    self.reader.raw_line(line)
+                }
+                RowKind::Separator => CONTEXT_SEPARATOR.to_owned(),
+            })
+            .collect();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.join("\n")));
+        self.hint = Some(
+            if cut {
+                format!(
+                    "Copied the first {} lines. Export to save them all",
+                    format_count(lines)
+                )
+            } else if lines == 1 {
+                "Copied 1 line".to_owned()
+            } else {
+                format!("Copied {} lines", format_count(lines))
+            }
+            .into(),
+        );
+        cx.notify();
+    }
+
+    /// Asks where to save the lines the dock shows, then writes them there: every stored
+    /// line, or the filter's matches with any context.
+    pub fn export_lines(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_new_path(&export_directory(), Some(EXPORT_NAME));
+        self.export = Some(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = chosen.await else {
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Ok(Some(mut export)) = this.update(cx, |this, _| this.start_export(path)) else {
+                return;
+            };
+            loop {
+                let progress = export.progress();
+                let hint = export_hint(&progress, &name);
+                if this
+                    .update(cx, |this, cx| {
+                        this.hint = Some(hint.into());
+                        cx.notify();
+                    })
+                    .is_err()
+                    || progress.finished
+                {
+                    return;
+                }
+                if export.next().await.is_none() {
+                    return;
+                }
+                cx.background_executor().timer(FRAME_INTERVAL).await;
+            }
+        }));
+    }
+
+    /// Starts writing what the dock shows to `path`.
+    fn start_export(&mut self, path: std::path::PathBuf) -> Option<LogExport> {
+        match self.scan() {
+            None => Some(self.reader.export(path)),
+            Some(Ok(scan)) => Some(scan.export(self.context, path)),
+            Some(Err(_)) => None,
+        }
+    }
+
     /// Shows the first line of the bar at `index`, and pauses following.
     fn jump_to_bucket(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(bucket) = self.timeline.buckets.get(index) else {
@@ -316,9 +603,9 @@ impl LogPane {
             return;
         };
         self.cursor = Some(self.timeline.bucket_start(index));
-        self.marked = None;
         self.hint = None;
-        self.show_line(first, 0);
+        let id = self.rows().row_of(first).unwrap_or(RowId::line(first));
+        self.show_row(id, 0);
         cx.notify();
     }
 
@@ -358,7 +645,7 @@ impl LogPane {
         self.timeline_buckets = buckets;
     }
 
-    fn scroll(&mut self, event: &ScrollEvent, rows: u64, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let pixels = event.delta.pixel_delta(px(LINE_HEIGHT)).y;
         self.scrolled_lines -= pixels / px(LINE_HEIGHT);
         let lines = self.scrolled_lines.trunc();
@@ -370,50 +657,30 @@ impl LogPane {
             self.cursor = None;
             self.hint = None;
         }
-        match self.filter.as_ref().map(|active| &active.scan) {
-            Some(Ok(scan)) => {
-                let total = scan.len() as u64;
-                let position = scan.position_of(self.top) as u64;
-                let position = scrolled_top(position, lines as i64, 0..total, rows) as usize;
-                if let Some(top) = scan.seqs(position..position + 1).first() {
-                    self.top = *top;
-                }
-            }
-            Some(Err(_)) => {}
-            None => self.top = scrolled_top(self.top, lines as i64, self.held(), rows),
+        if lines != 0. {
+            let top = self.top;
+            self.top = self.rows().step(top, lines as i64).unwrap_or(top);
         }
         cx.notify();
     }
 
-    /// The lines in view, and where they start among the matches when a filter is on.
-    fn visible_lines(&mut self, rows: u64) -> std::io::Result<Vec<LogLine>> {
-        let held = self.held();
-        let Some(active) = &self.filter else {
-            self.top = if self.following {
-                last_top(&held, rows)
-            } else {
-                scrolled_top(self.top, 0, held.clone(), rows)
-            };
-            return self.reader.read(self.top..self.top + rows);
-        };
-        let Ok(scan) = &active.scan else {
-            return Ok(Vec::new());
-        };
-        let total = scan.len() as u64;
-        let position = if self.following {
-            last_top(&(0..total), rows)
+    /// The rows in view: the newest while following, or those from the held position.
+    fn visible_rows(&mut self, rows: u64) -> std::io::Result<Vec<Row>> {
+        let (following, top) = (self.following, self.top);
+        let rows = rows as usize;
+        let view = if following {
+            self.rows().last(rows)?
         } else {
-            scrolled_top(scan.position_of(self.top) as u64, 0, 0..total, rows)
-        } as usize;
-        let lines = scan.lines(position..position + rows as usize)?;
-        if let Some(first) = lines.first() {
-            self.top = first.seq;
+            self.rows().view(top, rows)?
+        };
+        if let Some(first) = view.first() {
+            self.top = first.id;
         }
-        Ok(lines)
+        Ok(view)
     }
 
     /// Says how many lines match, or why the filter can't run.
-    fn render_count(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+    fn render_count(&self, compact: bool, cx: &App) -> Option<impl IntoElement + use<>> {
         let active = self.filter.as_ref()?;
         let theme = cx.theme();
         let (label, color) = match &active.scan {
@@ -423,14 +690,21 @@ impl LogPane {
             ),
             Err(error) => (error.to_string(), theme.danger),
         };
+        // A narrow header shows `312 of 48,210`, and the label still reads in full.
+        let shown = if compact {
+            label.replace(" lines", "")
+        } else {
+            label.clone()
+        };
         Some(
             div()
                 .id("log-filter-count")
                 .test_support()
-                .aria_label(label.clone())
-                .flex_shrink_0()
+                .aria_label(label)
+                .min_w_0()
+                .truncate()
                 .text_color(color)
-                .child(label),
+                .child(shown),
         )
     }
 
@@ -481,21 +755,80 @@ impl LogPane {
             .unwrap_or_default()
     }
 
+    /// A row of the dock: a line, a gap, or a separator between blocks of context.
+    fn render_row(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
+        let id = row.id;
+        let RowKind::Line { line, matched } = row.kind else {
+            return self.render_separator(id, cx);
+        };
+        let selected = self
+            .selection
+            .is_some_and(|selection| selection.contains(id));
+        let head = self.selection.is_some_and(|selection| selection.head == id);
+        let seq = line.seq;
+        let element = match line.gap {
+            Some(gap) => self.render_gap(&line, gap, cx),
+            None => self.render_line(line, matched, cx),
+        };
+        let theme = cx.theme();
+        element
+            .aria_selected(selected)
+            // The band reaches into the padding, so its text lines up with the times.
+            .mx(px(-GAP_INSET))
+            .pr(px(GAP_INSET))
+            .pl(px(if head {
+                GAP_INSET - MARK_WIDTH
+            } else {
+                GAP_INSET
+            }))
+            .when(selected, |row| row.bg(theme.table_active))
+            .when(head, |row| {
+                row.border_l(px(MARK_WIDTH)).border_color(theme.ring)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.lines_focus.focus(window, cx);
+                    this.select_row(id, seq, event.modifiers.shift, cx);
+                }),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// Marks lines of a source skipped between two blocks of context.
+    fn render_separator(&self, id: RowId, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        h_flex()
+            .id(("log-separator", id.key))
+            .test_support()
+            .aria_label("Lines skipped")
+            .h(px(LINE_HEIGHT))
+            .flex_shrink_0()
+            .gap_3()
+            .items_center()
+            .text_color(theme.muted_foreground)
+            .child(
+                div()
+                    .w(px(TIME_WIDTH))
+                    .flex_shrink_0()
+                    .child(CONTEXT_SEPARATOR),
+            )
+            .child(div().flex_1().h(px(1.)).bg(theme.border))
+            .into_any_element()
+    }
+
     /// A full-width row in place of the columns, so a gap reads apart from lines.
-    fn render_gap(&self, line: &LogLine, gap: Gap, cx: &App) -> AnyElement {
+    fn render_gap(&self, line: &LogLine, gap: Gap, cx: &App) -> Stateful<Div> {
         let source = self.source_label(line);
         let text = gap_text(gap, &Local);
         let theme = cx.theme();
         h_flex()
             .id(("log-line", line.seq))
-            .test_support()
             .aria_label(format!("{source} {text}"))
             .h(px(LINE_HEIGHT))
             .flex_shrink_0()
             .gap_3()
-            // The band reaches into the padding, so its text lines up with the times.
-            .mx(px(-GAP_INSET))
-            .px(px(GAP_INSET))
             .rounded_sm()
             .whitespace_nowrap()
             .overflow_hidden()
@@ -503,13 +836,11 @@ impl LogPane {
             .text_color(theme.muted_foreground)
             .child(text)
             .child(source)
-            .into_any_element()
     }
 
-    fn render_line(&self, line: LogLine, cx: &App) -> AnyElement {
-        if let Some(gap) = line.gap {
-            return self.render_gap(&line, gap, cx);
-        }
+    /// A line's columns. With context, `matched` marks the line the filter matched, and
+    /// the lines around it are muted.
+    fn render_line(&self, line: LogLine, matched: Option<bool>, cx: &App) -> Stateful<Div> {
         let source = self.source_label(&line);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -532,24 +863,25 @@ impl LogPane {
         } else {
             format!("{text} {fields}")
         };
-        let marked = self.marked == Some(line.seq);
+        let around = matched == Some(false);
         h_flex()
             .id(("log-line", line.seq))
-            .test_support()
             .aria_label(label)
-            .aria_selected(marked)
+            .when_some(matched, |row, matched| {
+                row.aria_description(if matched { "Match" } else { "Around a match" })
+            })
             .h(px(LINE_HEIGHT))
             .gap_3()
             .flex_shrink_0()
             .whitespace_nowrap()
             .overflow_hidden()
-            .when(marked, |row| {
-                row.mx(px(-GAP_INSET))
-                    .pl(px(GAP_INSET - MARK_WIDTH))
-                    .pr(px(GAP_INSET))
-                    .border_l(px(MARK_WIDTH))
-                    .border_color(theme.ring)
-                    .bg(theme.table_active)
+            .when_some(matched, |row, matched| {
+                row.child(
+                    div()
+                        .w(px(MATCH_MARK_WIDTH))
+                        .flex_shrink_0()
+                        .when(matched, |mark| mark.child("›")),
+                )
             })
             .child(
                 div()
@@ -582,12 +914,15 @@ impl LogPane {
                     .test_support()
                     .aria_label(shown)
                     .gap_3()
-                    .child(text)
+                    .child(
+                        div()
+                            .when(around, |text| text.text_color(muted))
+                            .child(text),
+                    )
                     .when(!fields.is_empty(), |row| {
                         row.child(div().text_color(muted).child(fields))
                     }),
             )
-            .into_any_element()
     }
 }
 
@@ -785,6 +1120,23 @@ fn legend_item(swatch: Div, word: &'static str, color: Hsla, count: Option<Strin
         .into_any_element()
 }
 
+/// What the dock header says while an export runs, and after.
+fn export_hint(progress: &ExportProgress, name: &str) -> String {
+    if let Some(error) = &progress.error {
+        return error.clone();
+    }
+    if progress.finished {
+        return match progress.lines {
+            1 => format!("Exported 1 line to {name}"),
+            lines => format!("Exported {} lines to {name}", format_count(lines as usize)),
+        };
+    }
+    let percent = (progress.done * 100)
+        .checked_div(progress.total)
+        .unwrap_or_default();
+    format!("Exporting to {name}: {percent}%")
+}
+
 /// What a gap row says, with times of day in `zone`.
 pub(crate) fn gap_text(gap: Gap, zone: &impl TimeZone<Offset: std::fmt::Display>) -> String {
     format!(
@@ -879,15 +1231,6 @@ fn no_matches_title(filter: &LogFilter) -> String {
     }
 }
 
-fn last_top(held: &Range<u64>, rows: u64) -> u64 {
-    held.end.saturating_sub(rows).max(held.start)
-}
-
-fn scrolled_top(top: u64, lines: i64, held: Range<u64>, rows: u64) -> u64 {
-    top.saturating_add_signed(lines)
-        .clamp(held.start, last_top(&held, rows))
-}
-
 impl Render for LogPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lines_height =
@@ -895,20 +1238,22 @@ impl Render for LogPane {
         let rows = (lines_height / px(LINE_HEIGHT)) as u64;
         self.rows = rows;
         let held = self.held();
-        let lines = self.visible_lines(rows);
+        let lines = self.visible_rows(rows);
         if let Ok(lines) = &lines {
-            self.visible = match (lines.first(), lines.last()) {
-                (Some(first), Some(last)) => first.seq..last.seq + 1,
-                _ => self.top..self.top,
-            };
-            let marked = lines
+            let seq = |row: &Row| Some(row.line()?.seq);
+            let first = lines.iter().find_map(seq);
+            let last = lines.iter().rev().find_map(seq);
+            self.visible = first.zip(last);
+            let head = self.selection.map(|selection| selection.head);
+            let selected = lines
                 .iter()
-                .find(|line| Some(line.seq) == self.marked)
-                .and_then(|line| line.timestamp);
-            self.view_time = marked.or_else(|| lines.iter().find_map(|line| line.timestamp));
+                .find(|row| Some(row.id) == head)
+                .and_then(|row| row.line()?.timestamp);
+            self.view_time =
+                selected.or_else(|| lines.iter().find_map(|row| row.line()?.timestamp));
         }
         self.update_timeline(window);
-        let compact = window.viewport_size().width < px(COMPACT_LEGEND_BELOW);
+        let compact = window.viewport_size().width < px(COMPACT_DOCK_BELOW);
         let timeline = self.render_timeline(compact, window, cx);
         let error = lines
             .as_ref()
@@ -928,8 +1273,14 @@ impl Render for LogPane {
             .unwrap_or_else(|| progress_summary(&self.progress, held.end - held.start));
         let following = self.following;
         let muted = cx.theme().muted_foreground;
-        let count = self.render_count(cx);
+        let count = self.render_count(compact, cx);
         let notice = self.render_filter_notice();
+        let filtered = self.filter.is_some();
+        let lines: Vec<AnyElement> = lines
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| self.render_row(row, cx))
+            .collect();
         v_flex()
             .id("logs")
             .size_full()
@@ -941,7 +1292,9 @@ impl Render for LogPane {
                     .gap_2()
                     .items_center()
                     .text_sm()
-                    .child(div().flex_shrink_0().font_medium().child("Logs"))
+                    .when(!compact, |header| {
+                        header.child(div().flex_shrink_0().font_medium().child("Logs"))
+                    })
                     .child(
                         div()
                             .id("log-summary")
@@ -954,18 +1307,47 @@ impl Render for LogPane {
                             .child(summary),
                     )
                     .children(count)
+                    .when(filtered, |header| {
+                        header.child(
+                            div()
+                                .w(px(if compact {
+                                    COMPACT_CONTEXT_PICKER_WIDTH
+                                } else {
+                                    CONTEXT_PICKER_WIDTH
+                                }))
+                                .flex_shrink_0()
+                                .child(
+                                    Select::new(&self.controls.context)
+                                        .id("log-context-picker")
+                                        .small()
+                                        .when(!compact, |select| select.title_prefix("Context: "))
+                                        .accessibility_label("Lines around each match"),
+                                ),
+                        )
+                    })
                     .child(
-                        div().w(px(SEVERITY_PICKER_WIDTH)).flex_shrink_0().child(
-                            Select::new(&self.controls.severity)
-                                .id("log-severity-picker")
-                                .small()
-                                .accessibility_label("Severity"),
-                        ),
+                        div()
+                            .w(px(if compact {
+                                COMPACT_SEVERITY_PICKER_WIDTH
+                            } else {
+                                SEVERITY_PICKER_WIDTH
+                            }))
+                            .flex_shrink_0()
+                            .child(
+                                Select::new(&self.controls.severity)
+                                    .id("log-severity-picker")
+                                    .small()
+                                    .accessibility_label("Severity"),
+                            ),
                     )
                     .child(
                         div()
                             .key_context(LOG_FILTER_CONTEXT)
-                            .w(px(FILTER_WIDTH))
+                            .w(px(if compact {
+                                COMPACT_FILTER_WIDTH
+                            } else {
+                                FILTER_WIDTH
+                            }))
                             .min_w(px(FILTER_MIN_WIDTH))
                             .child(
                                 Input::new(&self.controls.query)
@@ -976,14 +1358,38 @@ impl Render for LogPane {
                             ),
                     )
                     .child(
+                        Button::new("log-export")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Download)
+                            .tooltip("Export lines")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ExportLines), cx);
+                            }),
+                    )
+                    .child({
+                        let mode = if following { "Pause" } else { "Follow" };
                         Button::new("log-mode")
                             .small()
                             .ghost()
-                            .label(if following { "Pause" } else { "Follow" })
+                            .map(|button| {
+                                if compact {
+                                    button
+                                        .icon(if following {
+                                            IconName::Pause
+                                        } else {
+                                            IconName::Play
+                                        })
+                                        .tooltip(mode)
+                                        .accessibility_label(mode)
+                                } else {
+                                    button.label(mode)
+                                }
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_following(!following, cx);
-                            })),
-                    ),
+                            }))
+                    }),
             )
             .child(timeline)
             .map(|dock| match notice {
@@ -992,6 +1398,23 @@ impl Render for LogPane {
                     .child(
                         div()
                             .id("log-lines")
+                            .track_focus(&self.lines_focus)
+                            .key_context(LOG_LINES_CONTEXT)
+                            .on_action(cx.listener(|this, _: &SelectNextLine, _, cx| {
+                                this.move_selection(1, false, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &SelectPreviousLine, _, cx| {
+                                this.move_selection(-1, false, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &ExtendNextLine, _, cx| {
+                                this.move_selection(1, true, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &ExtendPreviousLine, _, cx| {
+                                this.move_selection(-1, true, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &ClearLineSelection, window, cx| {
+                                this.clear_selection(window, cx);
+                            }))
                             .flex_1()
                             .min_h_0()
                             .px_3()
@@ -1002,15 +1425,10 @@ impl Render for LogPane {
                             .overflow_hidden()
                             .text_size(cx.theme().mono_font_size)
                             .font_family(cx.theme().mono_font_family.clone())
-                            .on_scroll(cx.listener(move |this, event, _, cx| {
-                                this.scroll(event, rows, cx);
+                            .on_scroll(cx.listener(|this, event, _, cx| {
+                                this.scroll(event, cx);
                             }))
-                            .children(
-                                lines
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|line| self.render_line(line, cx)),
-                            ),
+                            .children(lines),
                     )
                     .into_any_element(),
             })
@@ -1026,8 +1444,8 @@ mod tests {
     use taffrail_core::{LogFilter, Severity};
 
     use super::{
-        chosen_severity, clock_time, follow_summary, gap_text, last_top, line_summary, match_count,
-        no_matches_title, scrolled_top,
+        chosen_severity, clock_time, follow_summary, gap_text, line_summary, match_count,
+        no_matches_title,
     };
 
     const NOV_7_2026_10_42_06_NANOS: i64 = 1_794_048_126_118_000_000;
@@ -1138,40 +1556,5 @@ mod tests {
         assert_eq!(chosen_severity(Some(&"WARN and above")), Severity::Warning);
         assert_eq!(chosen_severity(Some(&"All levels")), Severity::Unknown);
         assert_eq!(chosen_severity(None), Severity::Unknown);
-    }
-
-    #[test]
-    fn last_top_shows_the_newest_lines() {
-        assert_eq!(last_top(&(0..100), 10), 90);
-    }
-
-    #[test]
-    fn last_top_stays_at_the_oldest_line_when_lines_fit() {
-        assert_eq!(last_top(&(50..55), 10), 50);
-    }
-
-    #[test]
-    fn scrolling_moves_by_whole_lines() {
-        assert_eq!(scrolled_top(50, -3, 0..100, 10), 47);
-        assert_eq!(scrolled_top(50, 3, 0..100, 10), 53);
-    }
-
-    #[test]
-    fn scrolling_stops_at_both_ends() {
-        assert_eq!(scrolled_top(2, -5, 0..100, 10), 0);
-        assert_eq!(scrolled_top(88, 5, 0..100, 10), 90);
-    }
-
-    #[test]
-    fn a_held_position_moves_up_when_old_lines_are_dropped() {
-        assert_eq!(scrolled_top(10, 0, 500..1_000, 10), 500);
-    }
-
-    #[test]
-    fn scrolling_stays_exact_past_the_precision_of_f32() {
-        assert_eq!(
-            scrolled_top(123_456_789, 1, 0..200_000_000, 10),
-            123_456_790
-        );
     }
 }

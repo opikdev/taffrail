@@ -98,11 +98,17 @@ The signature element is the log timeline, a strip above the log lines that show
 - The filter stays when a new tail starts. Pause and follow work the same with a filter, and a held position stays on its line when the filter changes.
 - The timeline sits between the dock header and the lines. Each bar counts the lines stored in one stretch of time, stacked by severity from the bottom: **ERROR** in `error`, **WARN** in `warning`, **INFO** in `info`, and **OTHER**, for debug lines and lines with no severity, in `muted`. Each severity a bar holds draws at least 2 px high, so a single error stays visible.
 - Bars use the line's Kubernetes timestamp. Their length adapts to the time the stored lines span, from 1 second up, so the bars fit the strip, and the legend says how long each bar lasts: **5 s per bar**. Lines Taffrail writes itself have no time and no bar.
-- Below the bars, the strip shows its first and last time and a legend with each severity's word, swatch and count, so colour is never the only signal. Below 920 px of window width the legend leaves out the bar length.
+- Below the bars, the strip shows its first and last time and a legend with each severity's word, swatch and count, so colour is never the only signal. Below 920 px of window width the legend leaves out the bar length, and the dock header drops **Logs**, shortens the count to **312 of 48,210**, narrows its pickers and shows **Pause** as an icon.
 - The timeline counts what the filter shows. Without a filter it counts every stored line; with one, it counts the matches as the scan finds them.
 - Time where lines may be missing shows as hatched bars, and the legend adds **MISSING**.
 - Hover a bar to see its time and counts. Click it, or focus the timeline and press the left and right arrows, to show the first line stored in that time. This pauses following, like scrolling up. The bar the view is at shows in `selected`, with an `accent` edge while the timeline has focus.
-- `n` shows the next error the filter shows, and `Shift+N` the previous one, and mark it with an `accent` edge. With no error found yet, they look from the lines in view. When there is none, the header says **No later errors** or **No earlier errors**.
+- `n` selects the next error the filter shows, and `Shift+N` the previous one. They look from the selected line, or with none selected, from the lines in view. When there is none, the header says **No later errors** or **No earlier errors**.
+- While a filter is on, the **Context** picker shows **None**, **3 lines** or **10 lines** of each match's own source around it. A tail interleaves many pods, so the lines stored next to a match mostly come from other pods; the lines that explain it are the ones its own container wrote. Context looks at most 4,096 stored lines either side of a match, so a source that writes rarely shows fewer.
+- With context, matched lines carry a `›` mark and the lines around them are `muted`. A row reading `--` with a hairline separates blocks that are not next to each other. When two matches from one source have no more than twice the context between them, their blocks join, so no line shows twice.
+- Click a line to select it, and `Shift`-click another to select the lines between. With the lines focused, the up and down arrows move the selection, `Shift` with them extends it, and `Esc` clears it. Selecting a line pauses following. The selected lines show in `selected`, and the line the arrows move from has an `accent` edge.
+- `⌘C` / `Ctrl+C` copies the selected lines, up to 100,000 at a time. **Export lines**, the download button in the dock header, asks where to save, then writes what the dock shows: every stored line, or with a filter its matches and any context. It streams from the store, so an export of any size takes little memory. The header shows its progress, then **Exported 8,439,808 lines to taffrail-logs.log**. An export stops, and its partial file is removed, if a new tail replaces the dock.
+- Copied and exported lines read like `kubectl logs --prefix --timestamps`: `[pod/checkout-api-7f9c-x2k/app] 2026-11-07T10:42:06.118Z ` and then the line exactly as the container wrote it. Keeping the source and the Kubernetes timestamp means lines from many pods still make sense once pasted, and the text after them is byte for byte what was stored. Lines Taffrail writes itself, such as gaps, are included as stored, and blocks of context are separated by `--`, as `grep` separates them.
+- Exports go only to the file the user picks. Taffrail never writes log lines anywhere else, and neither copying nor exporting touches the cluster.
 - When a stream ends, the tail reconnects after 2 seconds and resumes after the last stored line. It asks for lines since that line's second, then skips those already stored, so a line is neither lost nor shown twice.
 - A container that restarted is read from where its previous run was left, then from the new run's first line, up to 10,000 lines.
 - Lines that cannot be read again show as one muted row across the full width, with the source: **Lines may be missing from 10:42:06 to 10:42:31**. This happens when the log rotated while disconnected, more than 10,000 lines were missed, the previous run's log is gone, or the pod was deleted after a lost connection. The end time of a deleted pod is when Taffrail found it gone.
@@ -130,7 +136,9 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `Space` | Pause or follow logs |
 | `n` / `Shift+N` | Next or previous error |
 | `←` `→` | Move between bars, when the timeline has focus |
-| `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it |
+| `↑` `↓`, `Shift+↑` `Shift+↓` | Select log lines, when the lines have focus |
+| `⌘C` / `Ctrl+C` | Copy the selected log lines |
+| `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it. In the log lines, clear the selection |
 | `?` | Show all shortcuts |
 
 ## Command palette

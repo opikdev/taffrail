@@ -10,6 +10,7 @@ mod pods;
 #[cfg(feature = "preview")]
 mod preview;
 mod root;
+mod rows;
 mod sidebar;
 mod theme;
 mod timeline;

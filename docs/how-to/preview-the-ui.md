@@ -22,6 +22,8 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `log-timeline-dark.png`, `log-timeline-light.png` | Ten minutes of ingress lines with a burst of errors and a minute marked missing, on the timeline |
 | `log-timeline-error-dark.png` | The same tail after `Shift+N`, with the last error marked |
 | `log-timeline-filtered-dark.png` | The same tail filtered to `refused`, with the timeline counting only matches |
+| `log-context-dark.png`, `log-context-light.png` | The same tail filtered to `refused` with **Context: 3 lines**, after `Shift+N` twice |
+| `log-context-narrow-dark.png` | The same at the 760 px minimum width, with the compact dock header |
 | `log-filter-dark.png`, `log-filter-light.png` | A tail filtered to `postgres` at **WARN and above**, with its count |
 | `log-no-matches-dark.png` | A log filter with no matching lines |
 | `log-filter-narrow-dark.png` | The log dock header and timeline with a filter at the 760 px minimum width |
