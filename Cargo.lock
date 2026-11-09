@@ -7417,6 +7417,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "regex",
  "serde",
  "serde-saphyr 2.1.1",
  "serde_json",

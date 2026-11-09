@@ -518,6 +518,41 @@ pub fn json_line(message: &[u8]) -> Option<JsonLine> {
     })
 }
 
+/// Whether a JSON object line has a field at `path` equal to `value`, ignoring case, or
+/// `None` if the line is not a JSON object. A path such as `log.level` names a key with a
+/// dot in it, or the `level` field of a `log` object.
+pub(super) fn json_field_equals(message: &[u8], path: &[u8], value: &str) -> Option<bool> {
+    let mut members = Members::new(message.trim_ascii())?;
+    for (key, found) in members.by_ref() {
+        if key == path {
+            if value_equals(found, value) {
+                return Some(true);
+            }
+            continue;
+        }
+        if let Some(rest) = path
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(b"."))
+            && let Value::Other(nested) = found
+            && json_field_equals(nested, rest, value) == Some(true)
+        {
+            return Some(true);
+        }
+    }
+    members.ended_cleanly().then_some(false)
+}
+
+fn value_equals(found: Value, value: &str) -> bool {
+    let raw = match found {
+        Value::String(raw) => &raw[1..raw.len() - 1],
+        Value::Other(raw) => raw,
+    };
+    if raw.is_ascii() && !raw.contains(&b'\\') {
+        return raw.eq_ignore_ascii_case(value.as_bytes());
+    }
+    json_text(found).to_lowercase() == value.to_lowercase()
+}
+
 /// A string value decoded, or any other value as written.
 fn json_text(value: Value) -> String {
     match value {

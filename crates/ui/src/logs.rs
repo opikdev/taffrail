@@ -2,12 +2,16 @@ use std::ops::Range;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, Theme, h_flex, v_flex};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, Theme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Following, Gap, LogLine, LogProgress, LogReader, LogTail, Severity, json_line,
+    FilterError, FilterProgress, Following, Gap, LogFilter, LogFilterScan, LogLine, LogProgress,
+    LogReader, LogTail, Severity, json_line,
 };
 
 use crate::pods::format_count;
@@ -21,6 +25,47 @@ const GAP_INSET: f32 = 8.;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const DOCK_SHARE: f32 = 0.42;
 const MINIMUM_DOCK_HEIGHT: f32 = 160.;
+const FILTER_WIDTH: f32 = 220.;
+const FILTER_MIN_WIDTH: f32 = 96.;
+const SEVERITY_PICKER_WIDTH: f32 = 136.;
+const NOTICE_WIDTH: f32 = 420.;
+/// The key context around the log filter field, where `Esc` clears it.
+pub const LOG_FILTER_CONTEXT: &str = "LogFilter";
+
+/// The choices of the severity picker, lowest first.
+pub const SEVERITY_CHOICES: [(&str, Severity); 4] = [
+    ("All levels", Severity::Unknown),
+    ("INFO and above", Severity::Info),
+    ("WARN and above", Severity::Warning),
+    ("ERROR only", Severity::Error),
+];
+
+pub type SeverityPicker = SelectState<Vec<&'static str>>;
+
+/// The severity a picker choice stands for.
+pub fn chosen_severity(choice: Option<&&'static str>) -> Severity {
+    SEVERITY_CHOICES
+        .iter()
+        .find(|(label, _)| Some(label) == choice)
+        .map_or(Severity::Unknown, |(_, severity)| *severity)
+}
+
+/// The filter field and severity picker, which outlive any one tail.
+#[derive(Clone)]
+pub struct LogControls {
+    pub query: Entity<InputState>,
+    pub severity: Entity<SeverityPicker>,
+}
+
+actions!(taffrail, [ResetLogFilter]);
+
+/// A filter and the scan that finds its lines.
+struct ActiveFilter {
+    filter: LogFilter,
+    scan: Result<LogFilterScan, FilterError>,
+    progress: FilterProgress,
+    _updates: Option<Task<()>>,
+}
 
 /// How tall the log dock is in a window of this height.
 pub fn dock_height(window_height: Pixels) -> Pixels {
@@ -34,15 +79,23 @@ pub fn dock_height(window_height: Pixels) -> Pixels {
 pub struct LogPane {
     reader: LogReader,
     progress: LogProgress,
+    /// The first line in view. With a filter, the first matching line in view.
     top: u64,
     following: bool,
     scrolled_lines: f32,
     note: Option<SharedString>,
+    controls: LogControls,
+    filter: Option<ActiveFilter>,
     _updates: Task<()>,
 }
 
 impl LogPane {
-    pub fn new(mut tail: LogTail, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mut tail: LogTail,
+        controls: LogControls,
+        filter: LogFilter,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let reader = tail.reader();
         let updates = cx.spawn(async move |this, cx| {
             while let Some(progress) = tail.next().await {
@@ -56,15 +109,62 @@ impl LogPane {
                 cx.background_executor().timer(FRAME_INTERVAL).await;
             }
         });
-        Self {
+        let mut pane = Self {
             reader,
             progress: LogProgress::default(),
             top: 0,
             following: true,
             scrolled_lines: 0.,
             note: None,
+            controls,
+            filter: None,
             _updates: updates,
+        };
+        pane.set_filter(filter, cx);
+        pane
+    }
+
+    /// Narrows the lines to those `filter` matches, across every stored line. A held
+    /// position stays on the same line.
+    pub fn set_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        let current = self.filter.as_ref().map(|active| &active.filter);
+        if current == Some(&filter) || (current.is_none() && filter.is_empty()) {
+            return;
         }
+        if filter.is_empty() {
+            self.filter = None;
+            cx.notify();
+            return;
+        }
+        let scan = self.reader.filter(&filter);
+        let progress = scan
+            .as_ref()
+            .map(LogFilterScan::progress)
+            .unwrap_or_default();
+        let updates = scan.as_ref().ok().map(|scan| {
+            let mut updates = scan.updates();
+            cx.spawn(async move |this, cx| {
+                while let Some(progress) = updates.next().await {
+                    let updated = this.update(cx, |this, cx| {
+                        if let Some(active) = &mut this.filter {
+                            active.progress = progress;
+                        }
+                        cx.notify();
+                    });
+                    if updated.is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(FRAME_INTERVAL).await;
+                }
+            })
+        });
+        self.filter = Some(ActiveFilter {
+            filter,
+            scan,
+            progress,
+            _updates: updates,
+        });
+        cx.notify();
     }
 
     /// Shows `note` in place of the summary, such as while a workload is found.
@@ -105,8 +205,108 @@ impl LogPane {
         if lines < 0. {
             self.following = false;
         }
-        self.top = scrolled_top(self.top, lines as i64, self.held(), rows);
+        match self.filter.as_ref().map(|active| &active.scan) {
+            Some(Ok(scan)) => {
+                let total = scan.len() as u64;
+                let position = scan.position_of(self.top) as u64;
+                let position = scrolled_top(position, lines as i64, 0..total, rows) as usize;
+                if let Some(top) = scan.seqs(position..position + 1).first() {
+                    self.top = *top;
+                }
+            }
+            Some(Err(_)) => {}
+            None => self.top = scrolled_top(self.top, lines as i64, self.held(), rows),
+        }
         cx.notify();
+    }
+
+    /// The lines in view, and where they start among the matches when a filter is on.
+    fn visible_lines(&mut self, rows: u64) -> std::io::Result<Vec<LogLine>> {
+        let held = self.held();
+        let Some(active) = &self.filter else {
+            self.top = if self.following {
+                last_top(&held, rows)
+            } else {
+                scrolled_top(self.top, 0, held.clone(), rows)
+            };
+            return self.reader.read(self.top..self.top + rows);
+        };
+        let Ok(scan) = &active.scan else {
+            return Ok(Vec::new());
+        };
+        let total = scan.len() as u64;
+        let position = if self.following {
+            last_top(&(0..total), rows)
+        } else {
+            scrolled_top(scan.position_of(self.top) as u64, 0, 0..total, rows)
+        } as usize;
+        let lines = scan.lines(position..position + rows as usize)?;
+        if let Some(first) = lines.first() {
+            self.top = first.seq;
+        }
+        Ok(lines)
+    }
+
+    /// Says how many lines match, or why the filter can't run.
+    fn render_count(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let active = self.filter.as_ref()?;
+        let theme = cx.theme();
+        let (label, color) = match &active.scan {
+            Ok(scan) => (
+                match_count(scan.len(), self.held(), active.progress.complete),
+                theme.muted_foreground,
+            ),
+            Err(error) => (error.to_string(), theme.danger),
+        };
+        Some(
+            div()
+                .id("log-filter-count")
+                .test_support()
+                .aria_label(label.clone())
+                .flex_shrink_0()
+                .text_color(color)
+                .child(label),
+        )
+    }
+
+    /// The **No matches** state, or why the filter can't run.
+    fn render_filter_notice(&self) -> Option<impl IntoElement + use<>> {
+        let active = self.filter.as_ref()?;
+        let title = match &active.scan {
+            Ok(scan) if scan.is_empty() && active.progress.complete => {
+                no_matches_title(&active.filter)
+            }
+            Ok(_) => return None,
+            Err(error) => error.to_string(),
+        };
+        Some(
+            v_flex()
+                .id("log-notice")
+                .test_support()
+                .aria_label(title.clone())
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_sm()
+                .child(
+                    div()
+                        .max_w(px(NOTICE_WIDTH))
+                        .text_center()
+                        .font_medium()
+                        .child(title),
+                )
+                .child(
+                    Button::new("log-clear-filter")
+                        .small()
+                        .outline()
+                        .label("Clear filter")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ResetLogFilter), cx);
+                        }),
+                ),
+        )
     }
 
     fn source_label(&self, line: &LogLine) -> String {
@@ -282,6 +482,34 @@ fn progress_summary(progress: &LogProgress, lines: u64) -> String {
     }
 }
 
+/// How many stored lines a filter has found, such as `312 of 48,210 lines`.
+fn match_count(matches: usize, held: Range<u64>, complete: bool) -> String {
+    let held = format_count((held.end - held.start) as usize);
+    let matches = format_count(matches);
+    if complete {
+        format!("{matches} of {held} lines")
+    } else {
+        format!("{matches} of {held} lines so far")
+    }
+}
+
+/// The **No matches** title for a filter that found nothing.
+fn no_matches_title(filter: &LogFilter) -> String {
+    let severity = match filter.severity {
+        Severity::Unknown => "",
+        Severity::Debug => " at DEBUG and above",
+        Severity::Info => " at INFO and above",
+        Severity::Warning => " at WARN and above",
+        Severity::Error => " at ERROR",
+    };
+    let query = filter.query.trim();
+    if query.is_empty() {
+        format!("No lines{severity}")
+    } else {
+        format!("No lines match \"{query}\"{severity}")
+    }
+}
+
 fn last_top(held: &Range<u64>, rows: u64) -> u64 {
     held.end.saturating_sub(rows).max(held.start)
 }
@@ -296,17 +524,16 @@ impl Render for LogPane {
         let lines_height = dock_height(window.viewport_size().height) - px(BAR_HEIGHT);
         let rows = (lines_height / px(LINE_HEIGHT)) as u64;
         let held = self.held();
-        self.top = if self.following {
-            last_top(&held, rows)
-        } else {
-            scrolled_top(self.top, 0, held.clone(), rows)
-        };
-        let lines = self.reader.read(self.top..self.top + rows);
+        let lines = self.visible_lines(rows);
         let error = lines
             .as_ref()
             .err()
             .map(|error| format!("Failed to read log lines: {error}"))
-            .or_else(|| self.progress.error.clone());
+            .or_else(|| self.progress.error.clone())
+            .or_else(|| {
+                let active = self.filter.as_ref()?;
+                active.progress.error.clone()
+            });
         let summary = self
             .note
             .as_ref()
@@ -314,6 +541,9 @@ impl Render for LogPane {
             .or(error)
             .unwrap_or_else(|| progress_summary(&self.progress, held.end - held.start));
         let following = self.following;
+        let muted = cx.theme().muted_foreground;
+        let count = self.render_count(cx);
+        let notice = self.render_filter_notice();
         v_flex()
             .id("logs")
             .size_full()
@@ -325,7 +555,7 @@ impl Render for LogPane {
                     .gap_2()
                     .items_center()
                     .text_sm()
-                    .child(div().font_medium().child("Logs"))
+                    .child(div().flex_shrink_0().font_medium().child("Logs"))
                     .child(
                         div()
                             .id("log-summary")
@@ -334,8 +564,30 @@ impl Render for LogPane {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(muted)
                             .child(summary),
+                    )
+                    .children(count)
+                    .child(
+                        div().w(px(SEVERITY_PICKER_WIDTH)).flex_shrink_0().child(
+                            Select::new(&self.controls.severity)
+                                .id("log-severity-picker")
+                                .small()
+                                .accessibility_label("Severity"),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .key_context(LOG_FILTER_CONTEXT)
+                            .w(px(FILTER_WIDTH))
+                            .min_w(px(FILTER_MIN_WIDTH))
+                            .child(
+                                Input::new(&self.controls.query)
+                                    .id("log-filter")
+                                    .small()
+                                    .prefix(Icon::new(IconName::Search).small().text_color(muted))
+                                    .aria_label("Filter log lines"),
+                            ),
                     )
                     .child(
                         Button::new("log-mode")
@@ -347,28 +599,33 @@ impl Render for LogPane {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .id("log-lines")
-                    .flex_1()
-                    .min_h_0()
-                    .px_3()
-                    .flex()
-                    .flex_col()
-                    .when(following, |lines| lines.justify_end())
-                    .overflow_hidden()
-                    .text_size(cx.theme().mono_font_size)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .on_scroll(cx.listener(move |this, event, _, cx| {
-                        this.scroll(event, rows, cx);
-                    }))
-                    .children(
-                        lines
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|line| self.render_line(line, cx)),
-                    ),
-            )
+            .map(|dock| match notice {
+                Some(notice) => dock.child(notice).into_any_element(),
+                None => dock
+                    .child(
+                        div()
+                            .id("log-lines")
+                            .flex_1()
+                            .min_h_0()
+                            .px_3()
+                            .flex()
+                            .flex_col()
+                            .when(following, |lines| lines.justify_end())
+                            .overflow_hidden()
+                            .text_size(cx.theme().mono_font_size)
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .on_scroll(cx.listener(move |this, event, _, cx| {
+                                this.scroll(event, rows, cx);
+                            }))
+                            .children(
+                                lines
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|line| self.render_line(line, cx)),
+                            ),
+                    )
+                    .into_any_element(),
+            })
     }
 }
 
@@ -378,7 +635,12 @@ mod tests {
 
     use chrono::{FixedOffset, Utc};
 
-    use super::{clock_time, follow_summary, gap_text, last_top, line_summary, scrolled_top};
+    use taffrail_core::{LogFilter, Severity};
+
+    use super::{
+        chosen_severity, clock_time, follow_summary, gap_text, last_top, line_summary, match_count,
+        no_matches_title, scrolled_top,
+    };
 
     const NOV_7_2026_10_42_06_NANOS: i64 = 1_794_048_126_118_000_000;
 
@@ -452,6 +714,42 @@ mod tests {
             follow_summary(&following(50, 1_200), 5),
             "Following deployment/checkout-api · 50 of 1,200 pods, the most a tail follows · 5 lines kept"
         );
+    }
+
+    #[test]
+    fn the_count_says_how_many_stored_lines_match() {
+        assert_eq!(match_count(312, 0..48_210, true), "312 of 48,210 lines");
+        assert_eq!(
+            match_count(12, 100..1_100, false),
+            "12 of 1,000 lines so far"
+        );
+    }
+
+    #[test]
+    fn no_matches_names_the_filter() {
+        let filter = |query: &str, severity| LogFilter {
+            query: query.into(),
+            severity,
+        };
+        assert_eq!(
+            no_matches_title(&filter(" timeout ", Severity::Unknown)),
+            "No lines match \"timeout\""
+        );
+        assert_eq!(
+            no_matches_title(&filter("timeout", Severity::Warning)),
+            "No lines match \"timeout\" at WARN and above"
+        );
+        assert_eq!(
+            no_matches_title(&filter("", Severity::Error)),
+            "No lines at ERROR"
+        );
+    }
+
+    #[test]
+    fn each_severity_choice_names_its_lowest_severity() {
+        assert_eq!(chosen_severity(Some(&"WARN and above")), Severity::Warning);
+        assert_eq!(chosen_severity(Some(&"All levels")), Severity::Unknown);
+        assert_eq!(chosen_severity(None), Severity::Unknown);
     }
 
     #[test]

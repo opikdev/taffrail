@@ -22,6 +22,7 @@ actions!(
         ShowShortcuts,
         ShowAbout,
         FocusFilter,
+        FocusLogFilter,
         OpenSelected,
         TailSelection,
         TailWorkload,
@@ -62,9 +63,10 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 16] = [
+pub const SHORTCUTS: [(&str, &str); 17] = [
     (MODIFIER_K, "Open the command palette"),
     ("/", "Filter pods"),
+    ("f", "Filter log lines"),
     ("j  k", "Move through rows"),
     ("Enter", "Open details"),
     ("l", "Tail logs for the selection"),
@@ -224,11 +226,16 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
         );
     }
     if source.has_tail {
-        actions = actions.item(command(
-            "Pause or follow logs",
-            IconName::Pause,
-            ToggleFollow,
-        ));
+        actions = actions
+            .item(
+                command("Filter log lines", IconName::Search, FocusLogFilter)
+                    .keywords(["severity", "regex", "json"]),
+            )
+            .item(command(
+                "Pause or follow logs",
+                IconName::Pause,
+                ToggleFollow,
+            ));
     }
     if source.has_selection {
         actions = actions

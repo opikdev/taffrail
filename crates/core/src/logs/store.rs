@@ -4,11 +4,12 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use k8s_openapi::jiff::Timestamp;
+use tokio::sync::watch;
 
 use super::parse::{Severity, line_severity, parse_rfc3339, split_timestamp};
 
-const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SEGMENTS: usize = 16;
+pub(super) const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_SEGMENTS: usize = 16;
 const INDEX_STRIDE: u64 = 256;
 const HEADER_BYTES: usize = size_of::<u16>() + size_of::<u8>() + size_of::<u32>();
 /// Set in the severity byte of a record that says lines may be missing.
@@ -147,7 +148,9 @@ impl Segment {
         Ok(())
     }
 
-    fn read(&self, range: Range<u64>, lines: &mut Vec<LogLine>) -> io::Result<()> {
+    /// Reads the records of the index blocks that hold `range` into `encoded`, and returns
+    /// the sequence number of the first record read.
+    fn encoded(&self, range: Range<u64>, encoded: &mut Vec<u8>) -> io::Result<u64> {
         let first_block = (range.start - self.first_seq) / INDEX_STRIDE;
         let end_block = (range.end - self.first_seq).div_ceil(INDEX_STRIDE);
         let start = self.index[first_block as usize];
@@ -156,37 +159,56 @@ impl Segment {
             .get(end_block as usize)
             .copied()
             .unwrap_or(self.bytes);
-        let mut encoded = vec![0; (end - start) as usize];
+        encoded.resize((end - start) as usize, 0);
         (&self.file).seek(SeekFrom::Start(start))?;
-        (&self.file).read_exact(&mut encoded)?;
-
-        let mut seq = self.first_seq + first_block * INDEX_STRIDE;
-        let mut rest = encoded.as_slice();
-        while seq < range.end {
-            let (
-                Decoded {
-                    source,
-                    severity,
-                    gap,
-                    text,
-                },
-                remaining,
-            ) = decode(rest)?;
-            if seq >= range.start {
-                lines.push(LogLine {
-                    seq,
-                    source,
-                    severity,
-                    timestamp: split_timestamp(text).0,
-                    text: String::from_utf8_lossy(text).into_owned(),
-                    gap: gap.then(|| Gap::parse(text)).flatten(),
-                });
-            }
-            rest = remaining;
-            seq += 1;
-        }
-        Ok(())
+        (&self.file).read_exact(encoded)?;
+        Ok(self.first_seq + first_block * INDEX_STRIDE)
     }
+
+    fn read(&self, range: Range<u64>, lines: &mut Vec<LogLine>) -> io::Result<()> {
+        let mut encoded = Vec::new();
+        let first = self.encoded(range.clone(), &mut encoded)?;
+        each_record(first, &encoded, range, |seq, record| {
+            lines.push(log_line(seq, record));
+        })
+    }
+}
+
+fn log_line(seq: u64, record: Decoded) -> LogLine {
+    LogLine {
+        seq,
+        source: record.source,
+        severity: record.severity,
+        timestamp: split_timestamp(record.text).0,
+        text: String::from_utf8_lossy(record.text).into_owned(),
+        gap: record.gap.then(|| Gap::parse(record.text)).flatten(),
+    }
+}
+
+/// Calls `visit` with each record of `encoded` that falls in `range`, where the first
+/// record of `encoded` is `seq`. It stops at the end of `range`.
+pub(super) fn each_record(
+    mut seq: u64,
+    mut encoded: &[u8],
+    range: Range<u64>,
+    mut visit: impl FnMut(u64, Decoded),
+) -> io::Result<()> {
+    while seq < range.end {
+        let (record, rest) = decode(encoded)?;
+        if seq >= range.start {
+            visit(seq, record);
+        }
+        encoded = rest;
+        seq += 1;
+    }
+    Ok(())
+}
+
+/// Where a raw read landed: `covered` lines were read, starting from the record at `first`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Encoded {
+    pub first: u64,
+    pub covered: Range<u64>,
 }
 
 fn encode(record: &Record, encoded: &mut Vec<u8>) {
@@ -198,11 +220,11 @@ fn encode(record: &Record, encoded: &mut Vec<u8>) {
 }
 
 /// One stored record, still borrowing its text.
-struct Decoded<'a> {
-    source: u16,
-    severity: Severity,
-    gap: bool,
-    text: &'a [u8],
+pub(super) struct Decoded<'a> {
+    pub source: u16,
+    pub severity: Severity,
+    pub gap: bool,
+    pub text: &'a [u8],
 }
 
 /// Decodes the first record, and returns it with the bytes after it.
@@ -236,6 +258,8 @@ pub(super) struct LogStore {
     segments: VecDeque<Segment>,
     segment_bytes: u64,
     max_segments: usize,
+    /// The sequence numbers held, sent after every append.
+    held: watch::Sender<Range<u64>>,
 }
 
 impl LogStore {
@@ -243,11 +267,12 @@ impl LogStore {
         Self::with_limits(SEGMENT_BYTES, MAX_SEGMENTS)
     }
 
-    fn with_limits(segment_bytes: u64, max_segments: usize) -> io::Result<Self> {
+    pub(super) fn with_limits(segment_bytes: u64, max_segments: usize) -> io::Result<Self> {
         Ok(Self {
             segments: VecDeque::from([Segment::new(0)?]),
             segment_bytes,
             max_segments,
+            held: watch::Sender::new(0..0),
         })
     }
 
@@ -267,7 +292,14 @@ impl LogStore {
             segment.lines += 1;
             encode(record, &mut encoded);
         }
-        self.current().write(&encoded)
+        let written = self.current().write(&encoded);
+        self.held.send_replace(self.range());
+        written
+    }
+
+    /// Changes each time lines are appended or dropped.
+    pub(super) fn watch(&self) -> watch::Receiver<Range<u64>> {
+        self.held.subscribe()
     }
 
     fn current(&mut self) -> &mut Segment {
@@ -304,6 +336,65 @@ impl LogStore {
             }
         }
         Ok(lines)
+    }
+
+    /// Reads the raw records of `range` into `encoded`, as far as the end of the segment
+    /// that holds its start. Returns `None` once nothing of `range` is held.
+    ///
+    /// This only copies bytes, so a caller can decode and match them without the lock.
+    pub(super) fn read_encoded(
+        &self,
+        range: Range<u64>,
+        encoded: &mut Vec<u8>,
+    ) -> io::Result<Option<Encoded>> {
+        let held = self.range();
+        let range = range.start.max(held.start)..range.end.min(held.end);
+        if range.is_empty() {
+            return Ok(None);
+        }
+        let segment = &self.segments[self.segment_of(range.start)];
+        let covered = range.start..range.end.min(segment.end_seq());
+        let first = segment.encoded(covered.clone(), encoded)?;
+        Ok(Some(Encoded { first, covered }))
+    }
+
+    /// Reads the lines with these sequence numbers, which must be in ascending order.
+    /// Lines already dropped are left out.
+    pub(super) fn read_seqs(&self, seqs: &[u64]) -> io::Result<Vec<LogLine>> {
+        let held = self.range();
+        let mut lines = Vec::with_capacity(seqs.len());
+        let mut encoded = Vec::new();
+        let mut wanted = seqs
+            .iter()
+            .copied()
+            .filter(|seq| held.contains(seq))
+            .peekable();
+        while let Some(&seq) = wanted.peek() {
+            let segment = &self.segments[self.segment_of(seq)];
+            let block = (seq - segment.first_seq) / INDEX_STRIDE;
+            let block_end = (segment.first_seq + (block + 1) * INDEX_STRIDE).min(segment.end_seq());
+            let first = segment.encoded(seq..block_end, &mut encoded)?;
+            each_record(first, &encoded, seq..block_end, |at, record| {
+                if wanted.next_if_eq(&at).is_some() {
+                    lines.push(log_line(at, record));
+                }
+            })?;
+            // A number out of order is skipped rather than read again.
+            wanted.next_if_eq(&seq);
+        }
+        Ok(lines)
+    }
+
+    /// Bytes on disk, for measuring.
+    #[cfg(test)]
+    pub(super) fn bytes(&self) -> u64 {
+        self.segments.iter().map(|segment| segment.bytes).sum()
+    }
+
+    /// The index of the segment that holds `seq`, which must be held.
+    fn segment_of(&self, seq: u64) -> usize {
+        self.segments
+            .partition_point(|segment| segment.end_seq() <= seq)
     }
 }
 
