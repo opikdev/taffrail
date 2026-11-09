@@ -1514,16 +1514,27 @@ mod tests {
     const POD_BODY: &str = r#"{"kind":"Pod","apiVersion":"v1","metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app","image":"api:1"}]},"status":{"phase":"Running"}}"#;
     const EVENTS_BODY: &str = r#"{"kind":"EventList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"e1","namespace":"shop"},"involvedObject":{"kind":"Pod","name":"api-1"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container"}]}"#;
     const LOG_BODY: &str = "2026-01-01T00:00:00Z first line\n";
+    const SEVERITY_LOG_BODY: &str = concat!(
+        "2026-01-01T00:00:00Z ERROR payment failed\n",
+        r#"2026-01-01T00:00:01Z {"level":"warn","ts":1.7e9,"msg":"slow query","ms":1204}"#,
+        "\n",
+        r#"2026-01-01T00:00:02Z {"level":"debug","seq":3}"#,
+        "\n",
+    );
     const OWNED_POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","uid":"u1","resourceVersion":"1","labels":{"app":"api"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"api-7f9c","uid":"r","controller":true}]},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"shop","name":"web-1","uid":"u2","resourceVersion":"1","labels":{"app":"web"}},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const REPLICA_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"api-7f9c","namespace":"shop","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"api","uid":"d","controller":true}]},"spec":{"selector":{"matchLabels":{"app":"api","pod-template-hash":"7f9c"}}}}"#;
     const DEPLOYMENT_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"api","namespace":"shop"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
 
     fn serve_pods(pod_list: &str) -> String {
+        serve_pods_with_logs(pod_list, LOG_BODY)
+    }
+
+    fn serve_pods_with_logs(pod_list: &str, logs: &str) -> String {
         serve(Fixture {
             pod_list: pod_list.into(),
             pod: POD_BODY.into(),
             events: EVENTS_BODY.into(),
-            logs: LOG_BODY.into(),
+            logs: logs.into(),
             live_logs: None,
             objects: Vec::new(),
         })
@@ -1774,6 +1785,57 @@ users:
             window.click("log-mode", cx);
             window.render_frame(cx);
             assert_eq!(window.find("log-mode").label(), Some("Follow"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn log_lines_show_their_severity_and_json_message(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_pods_with_logs(POD_LIST_BODY, SEVERITY_LOG_BODY);
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find(("log-line", 2u64)).is_some()
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find(("log-line", 0u64)).label(),
+                Some("api-1/app ERROR 2026-01-01T00:00:00Z ERROR payment failed")
+            );
+            assert_eq!(window.find(("log-severity", 0u64)).label(), Some("ERROR"));
+            assert_eq!(
+                window.find(("log-text", 0u64)).label(),
+                Some("ERROR payment failed")
+            );
+
+            assert_eq!(
+                window.find(("log-line", 1u64)).label(),
+                Some(
+                    r#"api-1/app WARN 2026-01-01T00:00:01Z {"level":"warn","ts":1.7e9,"msg":"slow query","ms":1204}"#
+                ),
+                "the raw line stays available"
+            );
+            assert_eq!(window.find(("log-severity", 1u64)).label(), Some("WARN"));
+            assert_eq!(
+                window.find(("log-text", 1u64)).label(),
+                Some("slow query ms=1204")
+            );
+
+            assert_eq!(window.find(("log-severity", 2u64)).label(), Some("DEBUG"));
+            assert_eq!(
+                window.find(("log-text", 2u64)).label(),
+                Some(r#"{"level":"debug","seq":3}"#),
+                "a JSON line without a message shows as written"
+            );
         })
         .unwrap();
     }

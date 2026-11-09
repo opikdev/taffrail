@@ -3,17 +3,62 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
+use super::parse::{Severity, line_severity, split_timestamp};
+
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 16;
 const INDEX_STRIDE: u64 = 256;
-const HEADER_BYTES: usize = size_of::<u16>() + size_of::<u32>();
+const HEADER_BYTES: usize = size_of::<u16>() + size_of::<u8>() + size_of::<u32>();
 
 /// One log line and the position it arrived in across all sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogLine {
     pub seq: u64,
     pub source: u16,
+    /// Found when the line was stored.
+    pub severity: Severity,
+    /// Nanoseconds since the Unix epoch, from the Kubernetes timestamp before the text.
+    pub timestamp: Option<i64>,
+    /// The line as stored, with its Kubernetes timestamp.
     pub text: String,
+}
+
+impl LogLine {
+    /// The line as the container wrote it, without its Kubernetes timestamp.
+    pub fn message(&self) -> &str {
+        match self.timestamp {
+            Some(_) => self.text.split_once(' ').map_or("", |(_, message)| message),
+            None => &self.text,
+        }
+    }
+}
+
+/// A line on its way into the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Record {
+    pub source: u16,
+    pub severity: Severity,
+    pub text: Vec<u8>,
+}
+
+impl Record {
+    /// A line from a container, with its severity found.
+    pub fn new(source: u16, text: Vec<u8>) -> Self {
+        Self {
+            source,
+            severity: line_severity(&text),
+            text,
+        }
+    }
+
+    /// A line Taffrail writes itself, such as why a stream ended.
+    pub fn note(source: u16, text: Vec<u8>) -> Self {
+        Self {
+            source,
+            severity: Severity::Unknown,
+            text,
+        }
+    }
 }
 
 struct Segment {
@@ -62,11 +107,13 @@ impl Segment {
         let mut seq = self.first_seq + first_block * INDEX_STRIDE;
         let mut rest = encoded.as_slice();
         while seq < range.end {
-            let (source, text, remaining) = decode(rest)?;
+            let (source, severity, text, remaining) = decode(rest)?;
             if seq >= range.start {
                 lines.push(LogLine {
                     seq,
                     source,
+                    severity,
+                    timestamp: split_timestamp(text).0,
                     text: String::from_utf8_lossy(text).into_owned(),
                 });
             }
@@ -77,23 +124,25 @@ impl Segment {
     }
 }
 
-fn encode(source: u16, text: &[u8], encoded: &mut Vec<u8>) {
-    encoded.extend_from_slice(&source.to_le_bytes());
-    encoded.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    encoded.extend_from_slice(text);
+fn encode(record: &Record, encoded: &mut Vec<u8>) {
+    encoded.extend_from_slice(&record.source.to_le_bytes());
+    encoded.push(record.severity.to_byte());
+    encoded.extend_from_slice(&(record.text.len() as u32).to_le_bytes());
+    encoded.extend_from_slice(&record.text);
 }
 
-fn decode(encoded: &[u8]) -> io::Result<(u16, &[u8], &[u8])> {
+fn decode(encoded: &[u8]) -> io::Result<(u16, Severity, &[u8], &[u8])> {
     let truncated = || io::Error::new(io::ErrorKind::InvalidData, "Truncated log record");
     let (header, rest) = encoded
         .split_at_checked(HEADER_BYTES)
         .ok_or_else(truncated)?;
     let source = u16::from_le_bytes([header[0], header[1]]);
-    let length = u32::from_le_bytes([header[2], header[3], header[4], header[5]]);
+    let severity = Severity::from_byte(header[2]);
+    let length = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
     let (text, rest) = rest
         .split_at_checked(length as usize)
         .ok_or_else(truncated)?;
-    Ok((source, text, rest))
+    Ok((source, severity, text, rest))
 }
 
 /// Log lines kept on disk in unnamed temporary files, which the OS removes on close.
@@ -118,9 +167,9 @@ impl LogStore {
         })
     }
 
-    pub(super) fn append(&mut self, lines: &[(u16, Vec<u8>)]) -> io::Result<()> {
+    pub(super) fn append(&mut self, lines: &[Record]) -> io::Result<()> {
         let mut encoded = Vec::new();
-        for (source, text) in lines {
+        for record in lines {
             if self.current().bytes + encoded.len() as u64 >= self.segment_bytes {
                 self.current().write(&encoded)?;
                 encoded.clear();
@@ -132,7 +181,7 @@ impl LogStore {
                 segment.index.push(offset);
             }
             segment.lines += 1;
-            encode(*source, text, &mut encoded);
+            encode(record, &mut encoded);
         }
         self.current().write(&encoded)
     }
@@ -178,9 +227,9 @@ impl LogStore {
 mod tests {
     use super::*;
 
-    fn lines(range: Range<usize>) -> Vec<(u16, Vec<u8>)> {
+    fn lines(range: Range<usize>) -> Vec<Record> {
         range
-            .map(|index| ((index % 3) as u16, format!("line {index}").into_bytes()))
+            .map(|index| Record::new((index % 3) as u16, format!("line {index}").into_bytes()))
             .collect()
     }
 
@@ -191,7 +240,13 @@ mod tests {
     #[test]
     fn reads_back_what_was_appended() {
         let mut store = LogStore::new().unwrap();
-        store.append(&lines(0..3)).unwrap();
+        store
+            .append(&[
+                Record::new(0, b"2026-11-07T10:42:06.5Z ERROR boom".to_vec()),
+                Record::new(1, b"{\"level\":\"warn\"}".to_vec()),
+                Record::note(2, b"[taffrail: ERROR tail ended]".to_vec()),
+            ])
+            .unwrap();
 
         let read = store.read(0..3).unwrap();
 
@@ -201,20 +256,28 @@ mod tests {
                 LogLine {
                     seq: 0,
                     source: 0,
-                    text: "line 0".into()
+                    severity: Severity::Error,
+                    timestamp: Some(1_794_048_126_500_000_000),
+                    text: "2026-11-07T10:42:06.5Z ERROR boom".into()
                 },
                 LogLine {
                     seq: 1,
                     source: 1,
-                    text: "line 1".into()
+                    severity: Severity::Warning,
+                    timestamp: None,
+                    text: r#"{"level":"warn"}"#.into()
                 },
                 LogLine {
                     seq: 2,
                     source: 2,
-                    text: "line 2".into()
+                    severity: Severity::Unknown,
+                    timestamp: None,
+                    text: "[taffrail: ERROR tail ended]".into()
                 },
             ]
         );
+        assert_eq!(read[0].message(), "ERROR boom");
+        assert_eq!(read[1].message(), r#"{"level":"warn"}"#);
     }
 
     #[test]
@@ -269,7 +332,10 @@ mod tests {
     fn keeps_text_that_is_empty_or_not_utf8() {
         let mut store = LogStore::new().unwrap();
         store
-            .append(&[(0, Vec::new()), (1, vec![0xff, b'a', b'\n', b'b'])])
+            .append(&[
+                Record::new(0, Vec::new()),
+                Record::new(1, vec![0xff, b'a', b'\n', b'b']),
+            ])
             .unwrap();
 
         assert_eq!(texts(&store.read(0..2).unwrap()), ["", "\u{fffd}a\nb"]);
@@ -307,7 +373,63 @@ mod tests {
 
     #[test]
     fn rejects_a_truncated_record() {
-        assert!(decode(&[1, 0, 200, 0, 0, 0, b'a']).is_err());
+        assert!(decode(&[1, 0, 4, 200, 0, 0, 0, b'a']).is_err());
         assert!(decode(&[1, 0]).is_err());
+    }
+
+    /// Run with `cargo test --release -p taffrail-core store_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run in release"]
+    fn store_speed() {
+        use std::time::Instant;
+
+        use super::super::parse::SAMPLE_LINES;
+
+        const LINES: usize = 1_000_000;
+        let texts: Vec<Vec<u8>> = SAMPLE_LINES
+            .iter()
+            .cycle()
+            .take(LINES)
+            .map(|line| line.to_vec())
+            .collect();
+        let text_bytes: usize = texts.iter().map(Vec::len).sum();
+        let ms = |started: Instant| started.elapsed().as_secs_f64() * 1e3;
+
+        let started = Instant::now();
+        let records: Vec<Record> = texts
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| Record::new((index % 50) as u16, text))
+            .collect();
+        let find = ms(started);
+
+        let mut store = LogStore::new().unwrap();
+        let started = Instant::now();
+        for batch in records.chunks(1024) {
+            store.append(batch).unwrap();
+        }
+        let append = ms(started);
+        let disk: u64 = store.segments.iter().map(|segment| segment.bytes).sum();
+
+        let started = Instant::now();
+        let read = store.read(0..LINES as u64).unwrap();
+        let read_ms = ms(started);
+        let started = Instant::now();
+        let reparsed = read
+            .iter()
+            .filter(|line| line_severity(line.text.as_bytes()) == line.severity)
+            .count();
+        let reparse = ms(started);
+        assert_eq!(reparsed, LINES);
+
+        println!(
+            "{LINES} lines, {:.0} MB of text, {:.0} MB on disk ({:.2}% for the severity byte)",
+            text_bytes as f64 / 1e6,
+            disk as f64 / 1e6,
+            LINES as f64 / disk as f64 * 100.,
+        );
+        println!(
+            "find severity {find:.0} ms, append {append:.0} ms, read {read_ms:.0} ms, find severity again on read {reparse:.0} ms"
+        );
     }
 }

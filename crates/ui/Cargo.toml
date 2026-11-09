@@ -17,6 +17,7 @@ bench = []
 preview = ["gpui-kit/test-support"]
 
 [dependencies]
+chrono.workspace = true
 gpui-kit.workspace = true
 taffrail-core.workspace = true
 

@@ -111,6 +111,24 @@ const LOG_LINES: [&str; 12] = [
     "INFO flushed 412 spans to otel-collector",
 ];
 
+/// Lines in the formats the log dock reads severity from, as one ingress controller pod.
+const FORMAT_LINES: [&str; 14] = [
+    r#"I1107 10:42:06.118123       7 main.go:104] "Starting NGINX Ingress controller" version="v1.12.1""#,
+    r#"{"level":"info","ts":"2026-11-07T10:42:06.2Z","msg":"watching ingresses","namespace":"storefront","class":"nginx"}"#,
+    r#"level=debug msg="sync loop" took=12ms"#,
+    r#"10.4.3.21 - - [07/Nov/2026:10:42:07 +0000] "GET /v1/orders/18274 HTTP/1.1" 200 512 "-" "curl/8.7.1""#,
+    r#"W1107 10:42:07.402911       7 controller.go:1126] Service "storefront/catalog" does not have any active Endpoint"#,
+    r#"{"level":"warn","msg":"slow upstream","upstream":"catalog-api","latency_ms":1204}"#,
+    "2026/11/07 10:42:08 [error] 31#31: *4821 connect() failed (111: Connection refused) while connecting to upstream",
+    r#"{"level":50,"time":1794048128,"msg":"health check failed","pod":"catalog-api-6d5f8b-x2k9q","attempt":3}"#,
+    "ERROR:root:certificate for shop.example.com expires in 6 days",
+    r#"time="2026-11-07T10:42:09Z" level=info msg="reloaded configuration" backends=14"#,
+    r#"{"severity":"DEBUG","message":"cache hit","key":"ingress/storefront"}"#,
+    r#"10.4.3.22 - - [07/Nov/2026:10:42:09 +0000] "POST /v1/charges HTTP/1.1" 201 84 "-" "checkout/2.31""#,
+    r#"E1107 10:42:10.118123       7 queue.go:131] "requeuing" err="failed to sync: context deadline exceeded""#,
+    r#"{"level":"info","msg":"request finished","method":"GET","path":"/healthz","status":200,"duration":"3ms"}"#,
+];
+
 fn pod_list(created: &str) -> String {
     let mut items = Vec::new();
     for (name, namespace, state, reason, restarts, node) in WORKLOADS {
@@ -219,8 +237,13 @@ fn events_body() -> String {
 }
 
 fn log_body() -> String {
+    stamped(&LOG_LINES, 40)
+}
+
+/// `count` lines from `lines`, one second apart from 10:42.
+fn stamped(lines: &[&str], count: usize) -> String {
     let mut body = String::new();
-    for (ix, line) in LOG_LINES.iter().cycle().take(40).enumerate() {
+    for (ix, line) in lines.iter().cycle().take(count).enumerate() {
         let (minute, second) = (42 + ix / 60, ix % 60);
         writeln!(body, "2026-11-07T10:{minute:02}:{second:02}.118Z {line}").unwrap();
     }
@@ -411,6 +434,33 @@ pub fn run(directory: PathBuf) {
     tailing(&server, ThemeMode::Dark).save(&directory, "logs-dark.png");
     tailing(&server, ThemeMode::Light).save(&directory, "logs-light.png");
     connected(&server, ThemeMode::Dark).save(&directory, "pods-dark.png");
+
+    let formats = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: stamped(&FORMAT_LINES, FORMAT_LINES.len()),
+        live_logs: None,
+        objects: workload_objects(),
+    });
+    for (mode, name) in [
+        (ThemeMode::Dark, "log-formats-dark.png"),
+        (ThemeMode::Light, "log-formats-light.png"),
+    ] {
+        let mut scene = connected(&formats, mode);
+        scene.set_namespace("ingress");
+        let root = scene.root.clone();
+        scene
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.tail_logs(cx)));
+        scene.wait_until(|window, _| {
+            window
+                .find("log-summary")
+                .label()
+                .is_some_and(|summary| !summary.ends_with(" 0 lines kept"))
+        });
+        scene.save(&directory, name);
+    }
 
     let mut collapsed = connected(&server, ThemeMode::Light);
     let root = collapsed.root.clone();

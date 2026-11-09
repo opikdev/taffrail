@@ -8,7 +8,8 @@ previews="$(mktemp -d)"
 trap 'rm -rf "$previews"' EXIT
 image="$root/docs/images/taffrail.png"
 
-TAFFRAIL_PREVIEW_DIR="$previews" cargo run --locked -p taffrail-ui --features preview \
+# The log dock shows local time, so render in UTC to match the sample timestamps.
+TZ=UTC TAFFRAIL_PREVIEW_DIR="$previews" cargo run --locked -p taffrail-ui --features preview \
   --manifest-path "$root/Cargo.toml" >/dev/null
 mkdir -p "$(dirname "$image")"
 

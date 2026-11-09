@@ -1,11 +1,12 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use chrono::{DateTime, Local, TimeZone};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, Theme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{Following, LogLine, LogProgress, LogReader, LogTail};
+use taffrail_core::{Following, LogLine, LogProgress, LogReader, LogTail, Severity, json_line};
 
 use crate::pods::format_count;
 
@@ -13,6 +14,7 @@ const LINE_HEIGHT: f32 = 20.;
 pub const BAR_HEIGHT: f32 = 40.;
 const TIME_WIDTH: f32 = 60.;
 const SOURCE_WIDTH: f32 = 210.;
+const SEVERITY_WIDTH: f32 = 40.;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const DOCK_SHARE: f32 = 0.42;
 const MINIMUM_DOCK_HEIGHT: f32 = 160.;
@@ -112,14 +114,31 @@ impl LogPane {
 
     fn render_line(&self, line: LogLine, cx: &App) -> impl IntoElement {
         let source = self.source_label(&line);
-        let muted = cx.theme().muted_foreground;
-        let (time, text) = split_time(&line.text);
-        let time = time.unwrap_or_default().to_owned();
-        let text = text.to_owned();
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let time = line
+            .timestamp
+            .map(|nanos| clock_time(nanos, &Local))
+            .unwrap_or_default();
+        let severity = line.severity.label();
+        let label = [source.as_str(), severity, line.text.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (text, fields) = match json_line(line.message().as_bytes()) {
+            Some(json) => (json.message, json.fields),
+            None => (line.message().to_owned(), String::new()),
+        };
+        let shown = if fields.is_empty() {
+            text.clone()
+        } else {
+            format!("{text} {fields}")
+        };
         h_flex()
             .id(("log-line", line.seq))
             .test_support()
-            .aria_label(format!("{source} {}", line.text))
+            .aria_label(label)
             .h(px(LINE_HEIGHT))
             .gap_3()
             .flex_shrink_0()
@@ -140,18 +159,46 @@ impl LogPane {
                     .text_color(muted)
                     .child(source),
             )
-            .child(div().child(text))
+            .child(
+                div()
+                    .id(("log-severity", line.seq))
+                    .test_support()
+                    .aria_label(severity)
+                    .w(px(SEVERITY_WIDTH))
+                    .flex_shrink_0()
+                    .text_color(severity_color(line.severity, theme))
+                    .child(severity),
+            )
+            .child(
+                h_flex()
+                    .id(("log-text", line.seq))
+                    .test_support()
+                    .aria_label(shown)
+                    .gap_3()
+                    .child(text)
+                    .when(!fields.is_empty(), |row| {
+                        row.child(div().text_color(muted).child(fields))
+                    }),
+            )
     }
 }
 
-/// Splits the leading Kubernetes timestamp into its `HH:MM:SS`, if there is one.
-fn split_time(text: &str) -> (Option<&str>, &str) {
-    let Some((stamp, rest)) = text.split_once(' ') else {
-        return (None, text);
-    };
-    match (stamp.as_bytes().get(10), stamp.get(11..19)) {
-        (Some(b'T'), Some(time)) => (Some(time), rest),
-        _ => (None, text),
+/// The wall-clock `HH:MM:SS` of a timestamp in `zone`.
+fn clock_time(unix_nanos: i64, zone: &impl TimeZone<Offset: std::fmt::Display>) -> String {
+    DateTime::from_timestamp_nanos(unix_nanos)
+        .with_timezone(zone)
+        .format("%H:%M:%S")
+        .to_string()
+}
+
+/// Errors, warnings and notices take their status colour. Debug lines and lines with no
+/// severity stay muted, and every severity also shows as a word.
+fn severity_color(severity: Severity, theme: &Theme) -> Hsla {
+    match severity {
+        Severity::Error => theme.danger,
+        Severity::Warning => theme.warning,
+        Severity::Info => theme.info,
+        Severity::Debug | Severity::Unknown => theme.muted_foreground,
     }
 }
 
@@ -287,21 +334,24 @@ impl Render for LogPane {
 mod tests {
     use taffrail_core::Following;
 
-    use super::{follow_summary, last_top, line_summary, scrolled_top, split_time};
+    use chrono::{FixedOffset, Utc};
+
+    use super::{clock_time, follow_summary, last_top, line_summary, scrolled_top};
+
+    const NOV_7_2026_10_42_06_NANOS: i64 = 1_794_048_126_118_000_000;
 
     #[test]
-    fn splits_the_time_from_a_kubernetes_timestamp() {
-        assert_eq!(
-            split_time("2026-11-07T10:42:06.118Z starting up"),
-            (Some("10:42:06"), "starting up")
-        );
+    fn shows_the_time_of_day_in_the_zone_given() {
+        assert_eq!(clock_time(NOV_7_2026_10_42_06_NANOS, &Utc), "10:42:06");
+        let india = FixedOffset::east_opt(5 * 3_600 + 30 * 60).unwrap();
+        assert_eq!(clock_time(NOV_7_2026_10_42_06_NANOS, &india), "16:12:06");
+        let new_york = FixedOffset::west_opt(5 * 3_600).unwrap();
+        assert_eq!(clock_time(NOV_7_2026_10_42_06_NANOS, &new_york), "05:42:06");
     }
 
     #[test]
-    fn keeps_lines_without_a_timestamp_whole() {
-        assert_eq!(split_time("plain text"), (None, "plain text"));
-        assert_eq!(split_time("no-spaces"), (None, "no-spaces"));
-        assert_eq!(split_time("2026-11-07Tést x"), (None, "2026-11-07Tést x"));
+    fn shows_times_before_the_epoch() {
+        assert_eq!(clock_time(-1_000_000_000, &Utc), "23:59:59");
     }
 
     #[test]
