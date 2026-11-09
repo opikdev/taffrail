@@ -52,9 +52,9 @@ cargo run --release --locked
 
 | For | Read |
 |---|---|
-| People using Taffrail | [Privacy policy](docs/privacy.md), [Keyboard shortcuts](docs/design.md#keyboard), [Security policy](SECURITY.md) |
+| People using Taffrail | [Install](docs/install.md), [Privacy policy](docs/privacy.md), [Keyboard shortcuts](docs/design.md#keyboard), [Security policy](SECURITY.md) |
 | Contributors | [Contributing](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), [UI design](docs/design.md), [Preview the UI](docs/how-to/preview-the-ui.md), [Simulate a large cluster](docs/how-to/simulate-a-large-cluster.md), [Measure performance](docs/how-to/measure-performance.md) |
-| Maintainers | [Roadmap](docs/roadmap.md), [Decisions](docs/decisions/): [ADR 001: Use GPUI with GPUI Kit](docs/decisions/001-use-gpui-with-gpui-kit.md), [ADR 002: Default to read-only with no telemetry](docs/decisions/002-read-only-with-no-telemetry.md) |
+| Maintainers | [Roadmap](docs/roadmap.md), [Decisions](docs/decisions/): [ADR 001: Use GPUI with GPUI Kit](docs/decisions/001-use-gpui-with-gpui-kit.md), [ADR 002: Default to read-only with no telemetry](docs/decisions/002-read-only-with-no-telemetry.md), [ADR 003: Package with cargo-packager](docs/decisions/003-package-with-cargo-packager.md), [Release](docs/release.md), [Code signing](docs/code-signing.md) |
 
 ## Contribute
 
