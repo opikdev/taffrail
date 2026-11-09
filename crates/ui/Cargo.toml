@@ -53,6 +53,11 @@ icons = [
     "assets/icon/icon.icns",
     "assets/icon/icon.ico",
 ]
+# LICENSE and THIRD-PARTY-LICENSES.html, which the release workflow writes with
+# scripts/third-party-licenses.sh. They go in Contents/Resources in the Mac app and next to
+# taffrail.exe from both Windows installers. The Linux job writes them to target/licenses/linux
+# instead, so that the .deb and the AppImage hold them only in /usr/share/doc/taffrail.
+resources = ["../../target/licenses/bundle/*"]
 
 [package.metadata.packager.macos]
 minimum-system-version = "11.0"
@@ -74,6 +79,14 @@ depends = [
     "libfontconfig1",
     "libfreetype6",
 ]
+
+[package.metadata.packager.deb.files]
+"../../target/licenses/linux/LICENSE" = "/usr/share/doc/taffrail/copyright"
+"../../target/licenses/linux/THIRD-PARTY-LICENSES.html" = "/usr/share/doc/taffrail/THIRD-PARTY-LICENSES.html"
+
+[package.metadata.packager.appimage.files]
+"../../target/licenses/linux/LICENSE" = "/usr/share/doc/taffrail/LICENSE"
+"../../target/licenses/linux/THIRD-PARTY-LICENSES.html" = "/usr/share/doc/taffrail/THIRD-PARTY-LICENSES.html"
 
 [package.metadata.packager.nsis]
 installer-icon = "assets/icon/icon.ico"

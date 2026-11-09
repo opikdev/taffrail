@@ -27,7 +27,7 @@ jobs:
           key: release
       - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
-          tool: cargo-packager@0.11.8
+          tool: cargo-packager@0.11.8,cargo-about@0.9.3
       - run: cargo build --release --locked -p taffrail-ui --target aarch64-apple-darwin
       - run: cargo build --release --locked -p taffrail-ui --target x86_64-apple-darwin
       - name: Join both architectures into one binary
@@ -37,15 +37,24 @@ jobs:
             target/aarch64-apple-darwin/release/taffrail \
             target/x86_64-apple-darwin/release/taffrail
           lipo -info target/universal-apple-darwin/release/taffrail
+      - name: Write the licenses for the app's resources
+        run: scripts/third-party-licenses.sh target/licenses/bundle aarch64-apple-darwin x86_64-apple-darwin
       - run: cargo packager --release -p taffrail-ui --target universal-apple-darwin --formats app,dmg
-      - name: Check the app is sealed, in the bundle and in the disk image
+      - name: Check the app is sealed and holds the licenses, in the bundle and in the disk image
         run: |
+          check() {
+            codesign --verify --deep --strict --verbose=2 "$1"
+            ls -l "$1/Contents/Resources"
+            for file in LICENSE THIRD-PARTY-LICENSES.html; do
+              test -s "$1/Contents/Resources/$file" || { echo "$1 has no $file." >&2; exit 1; }
+            done
+          }
           out=target/universal-apple-darwin/release
-          codesign --verify --deep --strict --verbose=2 "$out/Taffrail.app"
+          check "$out/Taffrail.app"
           codesign --display --verbose=2 "$out/Taffrail.app" 2>&1 | grep -E "Identifier=dev.opik.taffrail|Signature=adhoc"
           dmg="$(ls "$out"/*.dmg)"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" "$dmg"
-          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/dmg/Taffrail.app"
+          check "$RUNNER_TEMP/dmg/Taffrail.app"
           hdiutil detach "$RUNNER_TEMP/dmg"
       - name: Check the app starts
         run: scripts/smoke-launch.sh target/universal-apple-darwin/release/Taffrail.app/Contents/MacOS/taffrail
@@ -68,23 +77,37 @@ jobs:
           key: release
       - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
-          tool: cargo-packager@0.11.8
+          tool: cargo-packager@0.11.8,cargo-about@0.9.3
       - run: cargo build --release --locked -p taffrail-ui
+      - name: Write the licenses to install next to taffrail.exe
+        shell: bash
+        run: scripts/third-party-licenses.sh target/licenses/bundle x86_64-pc-windows-msvc
       - run: cargo packager --release -p taffrail-ui --formats nsis,wix
-      - name: Check both installers install, and the app starts
+      - name: Check both installers install with the licenses, and the app starts
         shell: pwsh
         run: |
+          function Find-Installed($root, $installer) {
+            $exe = Get-ChildItem $root -Filter taffrail.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $exe) { throw "The $installer did not install taffrail.exe" }
+            Write-Host "Installed $($exe.FullName)"
+            Get-ChildItem $exe.DirectoryName | Format-Table -AutoSize | Out-String | Write-Host
+            foreach ($file in "LICENSE", "THIRD-PARTY-LICENSES.html") {
+              $path = Join-Path $exe.DirectoryName $file
+              if (-not (Test-Path $path) -or (Get-Item $path).Length -eq 0) { throw "The $installer did not install $file" }
+            }
+            return $exe
+          }
+
           $out = "target/release"
           $msi = Get-ChildItem "$out/*.msi" | Select-Object -First 1
           $install = Start-Process msiexec -ArgumentList "/i `"$($msi.FullName)`" /qn" -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "The .msi failed with exit code $($install.ExitCode)" }
+          Find-Installed $env:ProgramFiles ".msi" | Out-Null
           Start-Process msiexec -ArgumentList "/x `"$($msi.FullName)`" /qn" -Wait
 
           $setup = Get-ChildItem "$out/*-setup.exe" | Select-Object -First 1
           Start-Process $setup.FullName -ArgumentList "/S" -Wait
-          $exe = Get-ChildItem $env:LOCALAPPDATA -Filter taffrail.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $exe) { throw "The -setup.exe did not install taffrail.exe" }
-          Write-Output "Installed $($exe.FullName)"
+          $exe = Find-Installed $env:LOCALAPPDATA "-setup.exe"
           $app = Start-Process $exe.FullName -PassThru
           Start-Sleep -Seconds 10
           if ($app.HasExited) { throw "The app exited within 10s with exit code $($app.ExitCode)" }
@@ -116,23 +139,29 @@ jobs:
           key: release
       - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
-          tool: cargo-packager@0.11.8
+          tool: cargo-packager@0.11.8,cargo-about@0.9.3
       - run: cargo build --release --locked -p taffrail-ui
+      - name: Write the licenses for /usr/share/doc/taffrail and the archive
+        run: scripts/third-party-licenses.sh target/licenses/linux x86_64-unknown-linux-gnu
       - run: cargo packager --release -p taffrail-ui --formats deb,appimage
-      - name: Archive the binary
+      - name: Archive the binary with the licenses
         run: |
           version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "taffrail-ui") | .version')"
           dir="taffrail_${version}_x86_64"
           mkdir -p "$RUNNER_TEMP/$dir"
-          cp target/release/taffrail LICENSE "$RUNNER_TEMP/$dir/"
+          cp target/release/taffrail target/licenses/linux/LICENSE target/licenses/linux/THIRD-PARTY-LICENSES.html "$RUNNER_TEMP/$dir/"
           cp crates/ui/assets/icon/256x256.png "$RUNNER_TEMP/$dir/taffrail.png"
           tar -czf "target/release/$dir.tar.gz" -C "$RUNNER_TEMP" "$dir"
-          tar -tzf "target/release/$dir.tar.gz"
-      - name: Check the .deb installs and its app starts
+          tar -tzf "target/release/$dir.tar.gz" | tee "$RUNNER_TEMP/tar.txt"
+          grep -qx "$dir/LICENSE" "$RUNNER_TEMP/tar.txt"
+          grep -qx "$dir/THIRD-PARTY-LICENSES.html" "$RUNNER_TEMP/tar.txt"
+      - name: Check the .deb installs with the licenses, and its app starts
         run: |
           ldd target/release/taffrail
           sudo apt-get install -y "$(ls "$PWD"/target/release/*.deb)"
           dpkg -L taffrail
+          test -s /usr/share/doc/taffrail/copyright
+          test -s /usr/share/doc/taffrail/THIRD-PARTY-LICENSES.html
           xvfb-run -a scripts/smoke-launch.sh taffrail
       - name: Check the .deb installs on a clean Debian with every library it links
         run: |
@@ -142,10 +171,14 @@ jobs:
             if ldd /usr/bin/taffrail | grep "not found"; then exit 1; fi
             echo "Every linked library was installed."
           '
-      - name: Check the AppImage starts
+      - name: Check the AppImage holds the licenses and starts
         run: |
-          appimage="$(ls target/release/*.AppImage)"
+          appimage="$PWD/$(ls target/release/*.AppImage)"
           chmod +x "$appimage"
+          (cd "$RUNNER_TEMP" && "$appimage" --appimage-extract >/dev/null)
+          ls -l "$RUNNER_TEMP/squashfs-root/usr/share/doc/taffrail"
+          test -s "$RUNNER_TEMP/squashfs-root/usr/share/doc/taffrail/LICENSE"
+          test -s "$RUNNER_TEMP/squashfs-root/usr/share/doc/taffrail/THIRD-PARTY-LICENSES.html"
           xvfb-run -a scripts/smoke-launch.sh "$appimage" --appimage-extract-and-run
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

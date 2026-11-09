@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taffrail third-party licences</title>
+<style>
+  :root { color-scheme: light dark; --muted: #6b6b6b; --rule: #d4d4d4; --code: #f4f4f4; }
+  @media (prefers-color-scheme: dark) { :root { --muted: #a3a3a3; --rule: #3a3a3a; --code: #1c1c1c; } }
+  body { max-width: 52rem; margin: 0 auto; padding: 2rem 1rem; font: 15px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 1.5rem; margin: 0 0 .5rem; }
+  h2 { font-size: 1.1rem; margin: 2.5rem 0 .5rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+  p, li { color: var(--muted); }
+  a { color: inherit; }
+  ul { padding-left: 1.25rem; }
+  pre { white-space: pre-wrap; padding: 1rem; background: var(--code); border-radius: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Third-party licences</h1>
+<p>Taffrail is licensed under Apache-2.0. Its binary also contains the crates below, used under these licences.</p>
+<ul>
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+{{#each licenses}}
+<h2 id="{{id}}">{{name}}</h2>
+<p>Used by:</p>
+<ul>
+{{#each used_by}}
+  <li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>
