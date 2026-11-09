@@ -32,3 +32,47 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# Read by cargo-packager in the release workflow. See docs/decisions/003-package-with-cargo-packager.md.
+[package.metadata.packager]
+product-name = "Taffrail"
+identifier = "dev.opik.taffrail"
+description = "A read-only Kubernetes console built around live logs"
+homepage = "https://github.com/opikdev/taffrail"
+publisher = "opikdev"
+authors = ["opikdev"]
+copyright = "Copyright 2026 the Taffrail contributors"
+category = "DeveloperTool"
+icons = [
+    "assets/icon/32x32.png",
+    "assets/icon/64x64.png",
+    "assets/icon/128x128.png",
+    "assets/icon/256x256.png",
+    "assets/icon/512x512.png",
+    "assets/icon/icon.icns",
+    "assets/icon/icon.ico",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+# An ad-hoc signature seals the bundle. It is not a Developer ID signature.
+signing-identity = "-"
+
+[package.metadata.packager.deb]
+desktop-template = "packaging/taffrail.desktop"
+section = "devel"
+# The binary links libxcb and libxkbcommon, and loads Vulkan, Wayland and fontconfig at run time.
+depends = [
+    "libc6",
+    "libgcc-s1",
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libvulkan1",
+    "libwayland-client0",
+    "libfontconfig1",
+    "libfreetype6",
+]
+
+[package.metadata.packager.nsis]
+installer-icon = "assets/icon/icon.ico"

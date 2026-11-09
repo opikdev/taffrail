@@ -1,0 +1,191 @@
+name: Release
+
+# A version tag builds every installer and attaches them to a draft release. A manual run
+# builds them as run artifacts only. See docs/release.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-packager@0.11.8
+      - run: cargo build --release --locked -p taffrail-ui --target aarch64-apple-darwin
+      - run: cargo build --release --locked -p taffrail-ui --target x86_64-apple-darwin
+      - name: Join both architectures into one binary
+        run: |
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/taffrail \
+            target/aarch64-apple-darwin/release/taffrail \
+            target/x86_64-apple-darwin/release/taffrail
+          lipo -info target/universal-apple-darwin/release/taffrail
+      - run: cargo packager --release -p taffrail-ui --target universal-apple-darwin --formats app,dmg
+      - name: Check the app is sealed, in the bundle and in the disk image
+        run: |
+          out=target/universal-apple-darwin/release
+          codesign --verify --deep --strict --verbose=2 "$out/Taffrail.app"
+          codesign --display --verbose=2 "$out/Taffrail.app" 2>&1 | grep -E "Identifier=dev.opik.taffrail|Signature=adhoc"
+          dmg="$(ls "$out"/*.dmg)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" "$dmg"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/dmg/Taffrail.app"
+          hdiutil detach "$RUNNER_TEMP/dmg"
+      - name: Check the app starts
+        run: scripts/smoke-launch.sh target/universal-apple-darwin/release/Taffrail.app/Contents/MacOS/taffrail
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: target/universal-apple-darwin/release/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-packager@0.11.8
+      - run: cargo build --release --locked -p taffrail-ui
+      - run: cargo packager --release -p taffrail-ui --formats nsis,wix
+      - name: Check both installers install, and the app starts
+        shell: pwsh
+        run: |
+          $out = "target/release"
+          $msi = Get-ChildItem "$out/*.msi" | Select-Object -First 1
+          $install = Start-Process msiexec -ArgumentList "/i `"$($msi.FullName)`" /qn" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "The .msi failed with exit code $($install.ExitCode)" }
+          Start-Process msiexec -ArgumentList "/x `"$($msi.FullName)`" /qn" -Wait
+
+          $setup = Get-ChildItem "$out/*-setup.exe" | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList "/S" -Wait
+          $exe = Get-ChildItem $env:LOCALAPPDATA -Filter taffrail.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "The -setup.exe did not install taffrail.exe" }
+          Write-Output "Installed $($exe.FullName)"
+          $app = Start-Process $exe.FullName -PassThru
+          Start-Sleep -Seconds 10
+          if ($app.HasExited) { throw "The app exited within 10s with exit code $($app.ExitCode)" }
+          Stop-Process -Id $app.Id
+          Write-Output "The app was still running after 10s."
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: |
+            target/release/*-setup.exe
+            target/release/*.msi
+          if-no-files-found: error
+
+  linux:
+    name: Linux
+    # The oldest supported runner, because the binary needs a glibc at least as new as the
+    # one it was built against. Ubuntu 22.04 has glibc 2.35.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The build needs the same packages as CI. Xvfb and Mesa's software renderers let the
+      # launch check run without a display or a GPU.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libfreetype-dev libvulkan1 libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb mesa-vulkan-drivers libgl1-mesa-dri
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-packager@0.11.8
+      - run: cargo build --release --locked -p taffrail-ui
+      - run: cargo packager --release -p taffrail-ui --formats deb,appimage
+      - name: Archive the binary
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "taffrail-ui") | .version')"
+          dir="taffrail_${version}_x86_64"
+          mkdir -p "$RUNNER_TEMP/$dir"
+          cp target/release/taffrail LICENSE "$RUNNER_TEMP/$dir/"
+          cp crates/ui/assets/icon/256x256.png "$RUNNER_TEMP/$dir/taffrail.png"
+          tar -czf "target/release/$dir.tar.gz" -C "$RUNNER_TEMP" "$dir"
+          tar -tzf "target/release/$dir.tar.gz"
+      - name: Check the .deb installs and its app starts
+        run: |
+          ldd target/release/taffrail
+          sudo apt-get install -y "$(ls "$PWD"/target/release/*.deb)"
+          dpkg -L taffrail
+          xvfb-run -a scripts/smoke-launch.sh taffrail
+      - name: Check the .deb installs on a clean Debian with every library it links
+        run: |
+          docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/target/release:/dist:ro" debian:stable-slim sh -euc '
+            apt-get update -qq
+            apt-get install -y -qq /dist/*.deb >/dev/null
+            if ldd /usr/bin/taffrail | grep "not found"; then exit 1; fi
+            echo "Every linked library was installed."
+          '
+      - name: Check the AppImage starts
+        run: |
+          appimage="$(ls target/release/*.AppImage)"
+          chmod +x "$appimage"
+          xvfb-run -a scripts/smoke-launch.sh "$appimage" --appimage-extract-and-run
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: |
+            target/release/*.deb
+            target/release/*.AppImage
+            target/release/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: github.ref_type == 'tag'
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag matches the version
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "taffrail-ui") | .version')"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml." >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: >-
+            Before you open Taffrail for the first time, read
+            [Install Taffrail](https://github.com/${{ github.repository }}/blob/main/docs/install.md).
+            These builds aren't code signed yet, so macOS and Windows warn you first. See the
+            [code signing policy](https://github.com/${{ github.repository }}/blob/main/docs/code-signing.md).
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Taffrail $GITHUB_REF_NAME" --notes "$NOTES"
