@@ -96,7 +96,13 @@ The signature element is the log timeline, a strip above the log lines that show
 - A marked gap always shows, whatever the filter, because lines that may be missing could have matched.
 - The severity picker shows **All levels**, **INFO and above**, **WARN and above** or **ERROR only**. Lines with no severity show only under **All levels**.
 - The filter stays when a new tail starts. Pause and follow work the same with a filter, and a held position stays on its line when the filter changes.
-- The timeline bars are stacked by severity. Click a bar to jump there, or press `n` for the next error.
+- The timeline sits between the dock header and the lines. Each bar counts the lines stored in one stretch of time, stacked by severity from the bottom: **ERROR** in `error`, **WARN** in `warning`, **INFO** in `info`, and **OTHER**, for debug lines and lines with no severity, in `muted`. Each severity a bar holds draws at least 2 px high, so a single error stays visible.
+- Bars use the line's Kubernetes timestamp. Their length adapts to the time the stored lines span, from 1 second up, so the bars fit the strip, and the legend says how long each bar lasts: **5 s per bar**. Lines Taffrail writes itself have no time and no bar.
+- Below the bars, the strip shows its first and last time and a legend with each severity's word, swatch and count, so colour is never the only signal. Below 920 px of window width the legend leaves out the bar length.
+- The timeline counts what the filter shows. Without a filter it counts every stored line; with one, it counts the matches as the scan finds them.
+- Time where lines may be missing shows as hatched bars, and the legend adds **MISSING**.
+- Hover a bar to see its time and counts. Click it, or focus the timeline and press the left and right arrows, to show the first line stored in that time. This pauses following, like scrolling up. The bar the view is at shows in `selected`, with an `accent` edge while the timeline has focus.
+- `n` shows the next error the filter shows, and `Shift+N` the previous one, and mark it with an `accent` edge. With no error found yet, they look from the lines in view. When there is none, the header says **No later errors** or **No earlier errors**.
 - When a stream ends, the tail reconnects after 2 seconds and resumes after the last stored line. It asks for lines since that line's second, then skips those already stored, so a line is neither lost nor shown twice.
 - A container that restarted is read from where its previous run was left, then from the new run's first line, up to 10,000 lines.
 - Lines that cannot be read again show as one muted row across the full width, with the source: **Lines may be missing from 10:42:06 to 10:42:31**. This happens when the log rotated while disconnected, more than 10,000 lines were missed, the previous run's log is gone, or the pod was deleted after a lost connection. The end time of a deleted pod is when Taffrail found it gone.
@@ -122,7 +128,8 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `y` | Show YAML |
 | `e` | Show events |
 | `Space` | Pause or follow logs |
-| `n` / `Shift+N` | Next or previous error, from milestone 3 |
+| `n` / `Shift+N` | Next or previous error |
+| `←` `→` | Move between bars, when the timeline has focus |
 | `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it |
 | `?` | Show all shortcuts |
 

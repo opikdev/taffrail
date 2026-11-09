@@ -256,6 +256,36 @@ fn stamped_from(lines: &[&str], count: usize, first: usize) -> String {
     body
 }
 
+/// Ten minutes of an ingress controller's lines, one to four a second, with a burst of
+/// errors from 10:46:10 and a quieter stretch after it. `seconds` picks which part.
+fn timeline_body(seconds: std::ops::Range<usize>) -> String {
+    const ERRORS: [&str; 3] = [
+        "2026/11/07 10:46:12 [error] 31#31: *4821 connect() failed (111: Connection refused) while connecting to upstream",
+        r#"{"level":"error","msg":"upstream unavailable","upstream":"catalog-api","status":502}"#,
+        r#"E1107 10:46:20.118123       7 queue.go:131] "requeuing" err="failed to sync: context deadline exceeded""#,
+    ];
+    let mut body = String::new();
+    for second in seconds {
+        // Lines that say nothing is wrong: info, debug and access lines.
+        const QUIET: [usize; 8] = [0, 1, 2, 3, 9, 10, 11, 13];
+        let burst = (250..290).contains(&second);
+        let wave = [1, 2, 3, 2, 1, 1, 2, 4, 3, 2][second / 20 % 10];
+        let lines = wave + second % 2 + if burst { 4 } else { 0 };
+        for line in 0..lines {
+            let text = if burst && line % 2 == 0 {
+                ERRORS[(second + line) % ERRORS.len()]
+            } else if burst || second % 23 == 0 {
+                FORMAT_LINES[4 + second % 2]
+            } else {
+                FORMAT_LINES[QUIET[(second + line) % QUIET.len()]]
+            };
+            let (minute, at) = (42 + second / 60, second % 60);
+            writeln!(body, "2026-11-07T10:{minute:02}:{at:02}.{line}00Z {text}").unwrap();
+        }
+    }
+    body
+}
+
 struct Scene {
     mode: ThemeMode,
     cx: HeadlessAppContext,
@@ -380,6 +410,15 @@ impl Scene {
             .expect("failed to write preview image");
         println!("{}", path.display());
     }
+}
+
+/// The lines the log dock says it keeps.
+fn kept_lines(window: &Window) -> Option<usize> {
+    window
+        .find("log-summary")
+        .label()
+        .and_then(|summary| summary.strip_suffix(" lines kept")?.rsplit(' ').next())
+        .and_then(|kept| kept.replace(',', "").parse::<usize>().ok())
 }
 
 fn connected(server: &str, mode: ThemeMode) -> Scene {
@@ -510,18 +549,57 @@ pub fn run(directory: PathBuf) {
             .cx
             .update(|cx| root.update(cx, |root, cx| root.tail_logs(cx)));
         scene.wait_until(|window, _| {
-            window
-                .find("log-summary")
-                .label()
-                .and_then(|summary| summary.strip_suffix(" lines kept")?.rsplit(' ').next())
-                .and_then(|kept| kept.replace(',', "").parse::<usize>().ok())
-                // Each pod's first lines, two notes, the gap and the lines after it.
-                .is_some_and(|kept| kept >= POD_SUFFIXES.len() * 17)
+            // Each pod's first lines, two notes, the gap and the lines after it.
+            kept_lines(window).is_some_and(|kept| kept >= POD_SUFFIXES.len() * 17)
         });
         scene.save(&directory, name);
         if mode == ThemeMode::Dark {
             scene.set_log_filter("", 3);
             scene.save(&directory, "log-gap-filtered-dark.png");
+        }
+    }
+
+    let timeline = |mode| {
+        // The stream drops at 10:47 and the log rotates, so a minute is marked missing.
+        let server = serve(Fixture {
+            pod_list: pod_list(created),
+            pod: pod_body(created),
+            events: events_body(),
+            logs: timeline_body(0..300),
+            live_logs: None,
+            objects: workload_objects(),
+            reconnect_logs: Some(timeline_body(360..600)),
+        });
+        let mut scene = connected(&server, mode);
+        scene.set_namespace("ingress");
+        let root = scene.root.clone();
+        scene
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.tail_logs(cx)));
+        let lines = timeline_body(0..300).lines().count() + timeline_body(360..600).lines().count();
+        scene.wait_until(|window, _| {
+            kept_lines(window).is_some_and(|kept| kept >= POD_SUFFIXES.len() * lines)
+        });
+        scene
+    };
+    for (mode, name) in [
+        (ThemeMode::Dark, "log-timeline-dark.png"),
+        (ThemeMode::Light, "log-timeline-light.png"),
+    ] {
+        let mut scene = timeline(mode);
+        scene.save(&directory, name);
+        if mode == ThemeMode::Dark {
+            let handle = scene.handle;
+            scene
+                .cx
+                .update_window(handle, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.press("shift-n", cx);
+                })
+                .expect("preview window closed");
+            scene.save(&directory, "log-timeline-error-dark.png");
+            scene.set_log_filter("refused", 0);
+            scene.save(&directory, "log-timeline-filtered-dark.png");
         }
     }
 

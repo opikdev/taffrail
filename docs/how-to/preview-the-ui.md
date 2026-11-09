@@ -19,9 +19,12 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `log-formats-dark.png`, `log-formats-light.png` | A tail of plain, logfmt, klog, nginx and JSON lines, with their severities |
 | `log-gap-dark.png`, `log-gap-light.png` | A tail whose logs rotated while it reconnected, with the missing lines marked |
 | `log-gap-filtered-dark.png` | The same tail at **ERROR only**, where the gaps still show |
+| `log-timeline-dark.png`, `log-timeline-light.png` | Ten minutes of ingress lines with a burst of errors and a minute marked missing, on the timeline |
+| `log-timeline-error-dark.png` | The same tail after `Shift+N`, with the last error marked |
+| `log-timeline-filtered-dark.png` | The same tail filtered to `refused`, with the timeline counting only matches |
 | `log-filter-dark.png`, `log-filter-light.png` | A tail filtered to `postgres` at **WARN and above**, with its count |
 | `log-no-matches-dark.png` | A log filter with no matching lines |
-| `log-filter-narrow-dark.png` | The log dock header with a filter at the 760 px minimum width |
+| `log-filter-narrow-dark.png` | The log dock header and timeline with a filter at the 760 px minimum width |
 | `follow-dark.png` | A tail following the selected pod's Deployment across two ReplicaSets |
 | `palette-dark.png`, `palette-search-dark.png` | The command palette, empty and searching |
 | `shortcuts-light.png` | The shortcut sheet |

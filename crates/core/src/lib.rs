@@ -16,8 +16,9 @@ pub use details::{ContainerDetails, PodDetails, PodEvent};
 pub use environment::use_login_shell_environment;
 pub use follow::Follow;
 pub use logs::{
-    FilterError, FilterProgress, FilterUpdates, Following, Gap, JsonLine, LogFilter, LogFilterScan,
-    LogLine, LogProgress, LogReader, LogTail, LogTarget, MAX_TAIL_PODS, Severity, json_line,
+    Bucket, FilterError, FilterProgress, FilterUpdates, Following, Gap, JsonLine, Level,
+    LevelCounts, LogFilter, LogFilterScan, LogLine, LogProgress, LogReader, LogTail, LogTarget,
+    MAX_TAIL_PODS, Severity, TimelineView, json_line,
 };
 pub use pods::{Owner, PodFeed, PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use selector::Selector;

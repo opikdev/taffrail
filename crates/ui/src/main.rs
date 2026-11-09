@@ -12,6 +12,7 @@ mod preview;
 mod root;
 mod sidebar;
 mod theme;
+mod timeline;
 mod windows;
 
 use std::path::PathBuf;

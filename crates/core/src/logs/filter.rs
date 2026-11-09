@@ -18,6 +18,7 @@ use super::matches::MatchSet;
 use super::parse::{Severity, json_field_equals, split_timestamp};
 use super::store::{Decoded, LogLine, each_record};
 use super::tail::LogReader;
+use super::timeline::{Mark, Timeline, TimelineView};
 
 /// Lines read and checked at a time. Each read holds the store's lock only while it copies
 /// the lines' bytes.
@@ -309,6 +310,8 @@ pub struct FilterProgress {
 #[derive(Default)]
 struct Found {
     matches: MatchSet,
+    /// The matches counted over time, and the matching error lines.
+    timeline: Timeline,
     /// The lines checked: older lines are added below, and new lines above.
     scanned: Range<u64>,
     held: Range<u64>,
@@ -332,6 +335,8 @@ struct Scanner {
     found: Arc<Mutex<Found>>,
     encoded: Vec<u8>,
     seqs: Vec<u64>,
+    /// What each match adds to the timeline, with the segment that holds it.
+    marks: Vec<(u64, u64, Mark)>,
 }
 
 impl Scanner {
@@ -343,9 +348,11 @@ impl Scanner {
                 matches: MatchSet::default(),
                 scanned: held.end..held.end,
                 held,
+                ..Found::default()
             })),
             encoded: Vec::new(),
             seqs: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -355,6 +362,7 @@ impl Scanner {
         let scanned = {
             let mut found = self.found.lock().expect("filter lock");
             found.matches.remove_below(held.start);
+            found.timeline.remove_below(held.start);
             let start = found.scanned.start.max(held.start);
             found.scanned = start..found.scanned.end.max(start);
             found.held = held.clone();
@@ -370,6 +378,9 @@ impl Scanner {
         self.check(range.clone())?;
         let mut found = self.found.lock().expect("filter lock");
         found.matches.extend(&self.seqs);
+        for (part, seq, mark) in self.marks.drain(..) {
+            found.timeline.add(part, seq, mark);
+        }
         found.scanned = found.scanned.start.min(range.start)..found.scanned.end.max(range.end);
         Ok(found.scanned != held)
     }
@@ -377,6 +388,7 @@ impl Scanner {
     /// Finds the matches in `range` and leaves them in `seqs`.
     fn check(&mut self, mut range: Range<u64>) -> io::Result<()> {
         self.seqs.clear();
+        self.marks.clear();
         while !range.is_empty() {
             let read = self
                 .reader
@@ -387,7 +399,12 @@ impl Scanner {
             let Some(read) = read else {
                 return Ok(());
             };
-            let (matcher, reader, seqs) = (&mut self.matcher, &self.reader, &mut self.seqs);
+            let (matcher, reader, seqs, marks) = (
+                &mut self.matcher,
+                &self.reader,
+                &mut self.seqs,
+                &mut self.marks,
+            );
             each_record(
                 read.first,
                 &self.encoded,
@@ -395,6 +412,9 @@ impl Scanner {
                 |seq, record| {
                     if matcher.matches(&record, reader) {
                         seqs.push(seq);
+                        if let Some(mark) = Mark::of(record.gap, record.severity, record.text) {
+                            marks.push((read.segment, seq, mark));
+                        }
                     }
                 },
             )?;
@@ -533,9 +553,37 @@ impl LogFilterScan {
             .read_seqs(&seqs)
     }
 
-    /// Roughly how much memory the matches take.
+    /// Roughly how much memory the matches take, with their timeline.
     pub fn match_bytes(&self) -> usize {
-        self.found.lock().expect("filter lock").matches.bytes()
+        let found = self.found.lock().expect("filter lock");
+        found.matches.bytes() + found.timeline.bytes()
+    }
+
+    /// The matching lines found so far, counted over time in at most `max_buckets` buckets.
+    pub fn timeline(&self, max_buckets: usize) -> TimelineView {
+        self.found
+            .lock()
+            .expect("filter lock")
+            .timeline
+            .view(max_buckets)
+    }
+
+    /// The first matching error line at or after `seq`.
+    pub fn next_error(&self, seq: u64) -> Option<u64> {
+        self.found
+            .lock()
+            .expect("filter lock")
+            .timeline
+            .next_error(seq)
+    }
+
+    /// The last matching error line before `seq`.
+    pub fn previous_error(&self, seq: u64) -> Option<u64> {
+        self.found
+            .lock()
+            .expect("filter lock")
+            .timeline
+            .previous_error(seq)
     }
 }
 
@@ -902,6 +950,61 @@ mod tests {
             .filter(|line| line.text.starts_with("ERROR"))
             .count();
         assert_eq!(progress.matches, expected);
+    }
+
+    #[test]
+    fn a_scan_counts_its_matches_over_time() {
+        let mut store = LogStore::with_limits(4096, 3).unwrap();
+        let stamped = |index: usize| {
+            let level = if index.is_multiple_of(10) {
+                "ERROR"
+            } else {
+                "INFO"
+            };
+            Record::new(
+                0,
+                format!("2026-11-07T10:42:{:02}Z {level} line {index}", index % 60).into_bytes(),
+            )
+        };
+        store
+            .append(&(0..400).map(stamped).collect::<Vec<_>>())
+            .unwrap();
+        let (mut scanner, reader) = scanner(store, "error");
+        while scanner.step(held(&reader)).unwrap() {}
+
+        let count = |scanner: &Scanner| {
+            let found = scanner.found.lock().unwrap();
+            (found.timeline.view(100).totals(), found.matches.len())
+        };
+        let (totals, matches) = count(&scanner);
+        assert_eq!(totals.0, [matches as u64, 0, 0, 0]);
+        let found = scanner.found.lock().unwrap();
+        let first = found.matches.select(0..1)[0];
+        assert_eq!(found.timeline.next_error(0), Some(first));
+        drop(found);
+
+        reader
+            .store
+            .lock()
+            .unwrap()
+            .append(&(400..1_400).map(stamped).collect::<Vec<_>>())
+            .unwrap();
+        let held = held(&reader);
+        while scanner.step(held.clone()).unwrap() {}
+
+        let (totals, matches) = count(&scanner);
+        assert_eq!(
+            totals.total(),
+            matches as u64,
+            "dropped matches leave the timeline"
+        );
+        let found = scanner.found.lock().unwrap();
+        assert!(
+            found
+                .timeline
+                .next_error(0)
+                .is_some_and(|seq| seq >= held.start)
+        );
     }
 
     async fn wait_for(
