@@ -18,17 +18,28 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 pub type PodKey = (String, String);
 type PodRows = BTreeMap<PodKey, Arc<PodRow>>;
 
-/// The fields of a pod that the table shows, so full objects need not stay in memory.
+/// The object that controls a pod, such as its ReplicaSet.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub kind: String,
+    pub name: String,
+}
+
+/// The fields of a pod that the app uses, so full objects need not stay in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PodRow {
     pub namespace: String,
     pub name: String,
+    /// Tells a pod apart from an earlier one with the same name, as a StatefulSet makes.
+    pub uid: String,
     pub status: String,
     pub ready: String,
     pub restarts: i32,
     pub node: String,
     pub created_unix: Option<i64>,
     pub containers: Vec<String>,
+    pub labels: BTreeMap<String, String>,
+    pub owner: Option<Owner>,
 }
 
 impl PodRow {
@@ -60,6 +71,7 @@ impl From<&Pod> for PodRow {
         Self {
             namespace: pod.metadata.namespace.clone().unwrap_or_default(),
             name: pod.metadata.name.clone().unwrap_or_default(),
+            uid: pod.metadata.uid.clone().unwrap_or_default(),
             status: display_status(pod),
             ready: format!("{ready}/{total}"),
             restarts: containers
@@ -82,6 +94,17 @@ impl From<&Pod> for PodRow {
                 .flat_map(|spec| &spec.containers)
                 .map(|container| container.name.clone())
                 .collect(),
+            labels: pod.metadata.labels.clone().unwrap_or_default(),
+            owner: pod
+                .metadata
+                .owner_references
+                .iter()
+                .flatten()
+                .find(|owner| owner.controller == Some(true))
+                .map(|owner| Owner {
+                    kind: owner.kind.clone(),
+                    name: owner.name.clone(),
+                }),
         }
     }
 }
@@ -221,6 +244,10 @@ async fn publish(
     }
 }
 
+/// The newest pods from a running watch, for anything that follows pods as they change.
+#[derive(Clone)]
+pub struct PodFeed(pub(crate) watch::Receiver<Arc<PodSnapshot>>);
+
 /// A running pod watch. Dropping it stops the watch.
 pub struct PodWatch {
     snapshots: watch::Receiver<Arc<PodSnapshot>>,
@@ -232,6 +259,11 @@ impl PodWatch {
     pub async fn next(&mut self) -> Option<Arc<PodSnapshot>> {
         self.snapshots.changed().await.ok()?;
         Some(self.snapshots.borrow_and_update().clone())
+    }
+
+    /// Shares this watch, so a log tail can follow pods without a watch of its own.
+    pub fn feed(&self) -> PodFeed {
+        PodFeed(self.snapshots.clone())
     }
 }
 
@@ -288,7 +320,13 @@ mod tests {
             "metadata": {
                 "namespace": "shop",
                 "name": "api-1",
+                "uid": "u-1",
                 "creationTimestamp": "2026-01-01T00:00:00Z",
+                "labels": { "app": "api" },
+                "ownerReferences": [
+                    { "apiVersion": "v1", "kind": "Node", "name": "node-1", "uid": "n" },
+                    { "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "api-7f9c", "uid": "r", "controller": true },
+                ],
             },
             "spec": {
                 "nodeName": "node-1",
@@ -309,12 +347,18 @@ mod tests {
             PodRow {
                 namespace: "shop".into(),
                 name: "api-1".into(),
+                uid: "u-1".into(),
                 status: "Running".into(),
                 ready: "1/2".into(),
                 restarts: 5,
                 node: "node-1".into(),
                 created_unix: Some(1_767_225_600),
                 containers: vec!["app".into(), "proxy".into()],
+                labels: BTreeMap::from([("app".into(), "api".into())]),
+                owner: Some(Owner {
+                    kind: "ReplicaSet".into(),
+                    name: "api-7f9c".into(),
+                }),
             }
         );
     }

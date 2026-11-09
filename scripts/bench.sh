@@ -22,7 +22,7 @@ kubectl config view --raw --minify --flatten --context="$context" >"$kubeconfig"
 cargo build --release --locked --features bench --manifest-path "$root/Cargo.toml"
 
 run() {
-  local label="$1" tail="$2" app
+  local label="$1" tail="$2" follow="${3:-}" app
   (
     while true; do
       "$root/scripts/sim-cluster.sh" churn >/dev/null
@@ -30,8 +30,8 @@ run() {
     done
   ) &
   rollouts=$!
-  KUBECONFIG="$kubeconfig" TAFFRAIL_BENCH_TAIL="$tail" TAFFRAIL_BENCH_SECONDS="$seconds" \
-    "$root/target/release/taffrail" &
+  KUBECONFIG="$kubeconfig" TAFFRAIL_BENCH_TAIL="$tail" TAFFRAIL_BENCH_FOLLOW="$follow" \
+    TAFFRAIL_BENCH_SECONDS="$seconds" "$root/target/release/taffrail" &
   app=$!
   sleep "$settle"
   "$root/scripts/sample-process-tree.py" "$app" --seconds "$((seconds - settle))" --label "$label"
@@ -42,3 +42,4 @@ run() {
 
 run scroll-churn 0
 run scroll-churn-tail 1
+run scroll-churn-follow 1 app=sim-churn

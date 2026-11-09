@@ -10,17 +10,19 @@ Start a [simulated cluster](simulate-a-large-cluster.md), then run:
 scripts/bench.sh
 ```
 
-Each run scrolls the pod table three rows per frame while pods churn, once alone and once with a log tail across 50 pods. It prints two JSON lines per run:
+Each run scrolls the pod table three rows per frame while pods churn: once alone, once with a log tail across 50 pods, and once following the churning Deployment's pods with `app=sim-churn`, so pods join and leave the tail during rollouts. It prints two JSON lines per run:
 
 | Output | Meaning |
 |---|---|
 | `frames`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms` | Time between presented frames |
 | `over_17ms`, `over_33ms` | Frames slower than these limits |
+| `log_sources`, `log_lines` | Containers the tail has streamed in all, and the last line number |
+| `followed_pods`, `matching_pods` | Pods a follow tails at the end, and pods that match |
 | `footprint_mb`, `peak_footprint_mb` | Physical footprint, the figure Activity Monitor shows |
 | `cpu_percent` | CPU time as a percentage of one core |
 | `wakeups_per_second` | Idle and interrupt wake-ups |
 
-Pass a duration in seconds to change the default of 20: `scripts/bench.sh 60`.
+Pass a duration in seconds to change the default of 20: `scripts/bench.sh 60`. For a cluster started with another `SIM_CLUSTER`, pass the same name: `SIM_CLUSTER=m3 scripts/bench.sh`.
 
 ## Sample a running process
 
@@ -45,3 +47,4 @@ scripts/sample-process-tree.py <pid> [<pid> ...] --seconds 20
 |---|---|---|
 | `TAFFRAIL_BENCH_SECONDS` | `30` | How long to scroll |
 | `TAFFRAIL_BENCH_TAIL` | `1` | Set to `0` to skip the log tail |
+| `TAFFRAIL_BENCH_FOLLOW` | Empty | A label selector to follow instead of tailing the first 50 pods |

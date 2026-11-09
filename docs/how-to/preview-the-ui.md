@@ -16,6 +16,7 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `logs-dark.png`, `logs-light.png` | The pod table with a log tail |
 | `pods-dark.png` | The pod table alone |
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
+| `follow-dark.png` | A tail following the selected pod's Deployment across two ReplicaSets |
 | `palette-dark.png`, `palette-search-dark.png` | The command palette, empty and searching |
 | `shortcuts-light.png` | The shortcut sheet |
 | `about-dark.png`, `about-light.png` | The **About Taffrail** sheet |

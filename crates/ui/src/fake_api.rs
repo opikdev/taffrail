@@ -15,6 +15,8 @@ pub struct Fixture {
     /// When set, each log request streams these messages forever instead of `logs`, so tails
     /// stay open and their sources interleave.
     pub live_logs: Option<&'static [&'static str]>,
+    /// Objects read by exact path, such as a pod's ReplicaSet and Deployment.
+    pub objects: Vec<(String, String)>,
 }
 
 /// A kubeconfig whose only context, `dev`, points at `server`.
@@ -80,7 +82,14 @@ fn serve_request(stream: TcpStream, fixture: &Fixture, started: Instant) {
     while request.read_line(&mut header).unwrap() > "\r\n".len() {
         header.clear();
     }
-    if request_line.contains("watch=true") {
+    let path = request_line
+        .split(' ')
+        .nth(1)
+        .and_then(|target| target.split('?').next())
+        .unwrap_or_default();
+    if let Some((_, body)) = fixture.objects.iter().find(|(object, _)| object == path) {
+        respond(&stream, body);
+    } else if request_line.contains("watch=true") {
         thread::park();
     } else if request_line.contains("/api/v1/pods") {
         respond(&stream, &fixture.pod_list);

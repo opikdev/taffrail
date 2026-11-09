@@ -69,6 +69,12 @@ The signature element is the log timeline, a strip above the log lines that show
 - Each line shows time, source, severity and text. Long lines clip by default, and **Wrap lines** wraps them.
 - The source column is hidden when you follow one pod.
 - Sources get a stable colour from a fixed set, and always keep their name.
+- **Tail its workload**, or `w`, follows the selected pod's controller: a Deployment, StatefulSet, DaemonSet, Job or ReplicaSet. A pod owned by a ReplicaSet follows the ReplicaSet's Deployment, so a rollout's new ReplicaSet is included.
+- Typing a label selector such as `app=checkout-api` in the palette offers **Tail pods matching app=checkout-api**, in the chosen namespace.
+- A followed tail adds pods that match as they appear and drops pods once they are deleted, over the same pod watch as the table. The header names what it follows: **Following deployment/checkout-api · 6 pods · 1,240 lines kept**.
+- A follow tails at most 50 pods. It keeps the pods it has, fills free places with the newest, and says when pods are left out: **50 of 120 pods, the most a tail follows**.
+- A pod that appears after a follow starts is read from its first line, up to 10,000 lines. Other pods start from their last 100 lines.
+- Lines from a pod that has left keep its name.
 - The view follows the newest lines until you scroll up or press **Pause**. Lines keep being stored while paused, and the button then reads **Follow (1,240 new)**.
 - Filters narrow the lines. Search highlights matches and keeps the surrounding lines.
 - The timeline bars are stacked by severity. Click a bar to jump there, or press `n` for the next error.
@@ -89,6 +95,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
 | `l` | Tail logs for the selection |
+| `w` | Tail the selected pod's workload |
 | `s` | Show the summary |
 | `y` | Show YAML |
 | `e` | Show events |
@@ -100,7 +107,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 ## Command palette
 
 - `⌘K`, or the search field in the title bar, opens the palette over the panel.
-- Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
+- Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Text with a selector operator, such as `=`, `!=`, `in` or `!`, also offers to tail the pods it matches. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
 - Choosing a pod selects it and opens its details. If the filter or namespace hid it, both clear first.
 - Below the pods, the palette lists the commands that apply now, then contexts and namespaces, with a check on the current ones.
 - Every command dispatches the same action as its key or button.
@@ -120,6 +127,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | No rows | **No pods in `payments`.** Offer **Show all namespaces**. |
 | No matches | **No pods match "web".** Offer **Clear filter**. |
 | Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |
+| No workload | **debug-shell has no workload to follow.** Shown in the log dock, which keeps any running tail. |
 | Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the log dock. |
 | Secret hidden | `••••••••` with **Reveal value**. Values hide again when you leave the object. |
 

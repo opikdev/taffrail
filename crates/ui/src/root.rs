@@ -1,3 +1,4 @@
+use std::io;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,17 +17,18 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, Contexts, LogTarget, MAX_TAIL_PODS, PodKey, PodSnapshot,
-    SavedState,
+    Backend, ClusterError, Connection, Contexts, Follow, LogTail, LogTarget, MAX_TAIL_PODS,
+    PodFeed, PodKey, PodSnapshot, SavedState, Selector,
 };
 
 use crate::about::render_about;
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
-use crate::logs::{LogPane, dock_height};
+use crate::logs::{BAR_HEIGHT, LogPane, dock_height};
 use crate::palette::{
     CloseWindow, FocusFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
     ReloadContexts, ShowAbout, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext,
-    SwitchNamespace, TailSelection, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
+    SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar,
+    groups, render_shortcuts,
 };
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
@@ -88,6 +90,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", OpenSelected, Some(TABLE_KEYS)),
         KeyBinding::new("/", FocusFilter, Some(TABLE_KEYS)),
         KeyBinding::new("l", TailSelection, Some(TABLE_KEYS)),
+        KeyBinding::new("w", TailWorkload, Some(TABLE_KEYS)),
         KeyBinding::new("s", ShowSummary, Some(TABLE_KEYS)),
         KeyBinding::new("e", ShowEvents, Some(TABLE_KEYS)),
         KeyBinding::new("y", ShowYaml, Some(TABLE_KEYS)),
@@ -192,7 +195,11 @@ pub struct Root {
     namespace_picker: Entity<NamespacePicker>,
     namespace_options: Vec<String>,
     connection: Option<Connection>,
+    pod_feed: Option<PodFeed>,
     logs: Option<Entity<LogPane>>,
+    /// Says what the log dock is waiting for, or why a tail could not start.
+    log_note: Option<SharedString>,
+    workload_task: Option<Task<()>>,
     details: Option<Entity<DetailsPane>>,
     palette: Option<Entity<CommandState>>,
     sheet: Option<Sheet>,
@@ -288,7 +295,10 @@ impl Root {
             namespace_picker,
             namespace_options,
             connection: None,
+            pod_feed: None,
             logs: None,
+            log_note: None,
+            workload_task: None,
             details: None,
             palette: None,
             sheet: None,
@@ -395,7 +405,10 @@ impl Root {
             context: context.clone(),
         };
         self.connection = None;
+        self.pod_feed = None;
         self.logs = None;
+        self.log_note = None;
+        self.workload_task = None;
         self.close_details(cx);
         self.show_pods(Arc::default(), window, cx);
         let connecting = self.backend.connect(contexts, context.clone());
@@ -418,12 +431,14 @@ impl Root {
                 }
             };
             let mut pods = backend.watch_pods(&connection);
+            let feed = pods.feed();
             this.update(cx, |this, cx| {
                 this.session = Session::Connected {
                     summary: connection_summary(&connection),
                     version: connection.server_version.clone(),
                 };
                 this.connection = Some(connection);
+                this.pod_feed = Some(feed);
                 cx.notify();
             })
             .ok();
@@ -447,16 +462,84 @@ impl Root {
         let Some(connection) = &self.connection else {
             return;
         };
-        match self.backend.tail_logs(connection, targets) {
+        let tail = self.backend.tail_logs(connection, targets);
+        self.show_tail(tail, cx);
+    }
+
+    /// Tails the pods that `follow` matches, as they come and go.
+    fn start_follow(&mut self, follow: Follow, cx: &mut Context<Self>) {
+        let (Some(connection), Some(feed)) = (&self.connection, &self.pod_feed) else {
+            return;
+        };
+        let tail = self.backend.follow_logs(connection, feed.clone(), follow);
+        self.show_tail(tail, cx);
+    }
+
+    fn show_tail(&mut self, tail: io::Result<LogTail>, cx: &mut Context<Self>) {
+        self.workload_task = None;
+        self.log_note = None;
+        match tail {
             Ok(tail) => self.logs = Some(cx.new(|cx| LogPane::new(tail, cx))),
-            Err(error) => {
-                self.session = Session::Failed {
-                    context: connection.context.clone(),
-                    error: format!("Failed to start log tail: {error}").into(),
-                }
-            }
+            Err(error) => self.set_log_note(Some(format!("Failed to start log tail: {error}")), cx),
         }
         cx.notify();
+    }
+
+    fn set_log_note(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        self.log_note = note.map(SharedString::from);
+        if let Some(logs) = &self.logs {
+            let note = self.log_note.clone();
+            logs.update(cx, |logs, cx| logs.set_note(note, cx));
+        }
+        cx.notify();
+    }
+
+    /// Follows the workload that controls the selected pod, such as its Deployment.
+    pub(crate) fn tail_workload(&mut self, cx: &mut Context<Self>) {
+        let table = self.pods.read(cx).delegate();
+        let selected = table.selected().and_then(|key| table.snapshot().find(key));
+        let (Some(row), Some(connection)) = (selected.cloned(), self.connection.as_ref()) else {
+            self.set_log_note(Some("Select a pod to tail its workload".to_owned()), cx);
+            return;
+        };
+        let name = row.name.clone();
+        let finding = self.backend.workload_of(connection, row);
+        self.set_log_note(Some(format!("Finding the workload of {name}")), cx);
+        self.workload_task = Some(cx.spawn(async move |this, cx| {
+            let found = finding.await;
+            this.update(cx, |this, cx| match found {
+                Ok(follow) => this.start_follow(follow, cx),
+                Err(error) => {
+                    this.workload_task = None;
+                    this.set_log_note(Some(error.to_string()), cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Follows the pods that `selector` matches in the chosen namespace.
+    fn tail_selector(&mut self, selector: &str, cx: &mut Context<Self>) {
+        match Selector::parse(selector) {
+            Ok(selector) => {
+                let follow = Follow::selector(self.namespace(cx), selector);
+                self.start_follow(follow, cx);
+            }
+            Err(error) => self.set_log_note(Some(error), cx),
+        }
+    }
+
+    #[cfg(feature = "bench")]
+    pub(crate) fn follow_selector(&mut self, selector: &str, cx: &mut Context<Self>) {
+        self.tail_selector(selector, cx);
+    }
+
+    #[cfg(feature = "bench")]
+    pub(crate) fn log_stats(
+        &self,
+        cx: &App,
+    ) -> Option<(usize, Option<taffrail_core::Following>, u64)> {
+        Some(self.logs.as_ref()?.read(cx).stats())
     }
 
     #[cfg(feature = "bench")]
@@ -1155,6 +1238,31 @@ fn tail_label(pods: usize, matching: usize) -> String {
     }
 }
 
+/// The log dock's header alone, before any tail has started.
+fn render_log_note(note: SharedString, cx: &App) -> impl IntoElement + use<> {
+    h_flex()
+        .h(px(BAR_HEIGHT))
+        .flex_shrink_0()
+        .px_3()
+        .gap_2()
+        .items_center()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .text_sm()
+        .child(div().font_medium().child("Logs"))
+        .child(
+            div()
+                .id("log-summary")
+                .test_support()
+                .aria_label(note.clone())
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(cx.theme().muted_foreground)
+                .child(note),
+        )
+}
+
 /// A centred sheet over the window. Clicking outside it closes it.
 fn render_overlay(
     width: f32,
@@ -1260,6 +1368,14 @@ impl Render for Root {
                 this.close_overlays(window, cx);
                 this.tail_selection(cx);
             }))
+            .on_action(cx.listener(|this, _: &TailWorkload, window, cx| {
+                this.close_overlays(window, cx);
+                this.tail_workload(cx);
+            }))
+            .on_action(cx.listener(|this, action: &TailSelector, window, cx| {
+                this.close_overlays(window, cx);
+                this.tail_selector(&action.selector, cx);
+            }))
             .on_action(cx.listener(|this, _: &ShowSummary, window, cx| {
                 this.close_overlays(window, cx);
                 this.show_tab(PaneTab::Summary, cx);
@@ -1364,6 +1480,11 @@ impl Render for Root {
                                             .border_color(border)
                                             .child(logs),
                                     )
+                                })
+                                .when(self.logs.is_none(), |panel| {
+                                    panel.when_some(self.log_note.clone(), |panel, note| {
+                                        panel.child(render_log_note(note, cx))
+                                    })
                                 }),
                         ),
                     ),
@@ -1393,6 +1514,9 @@ mod tests {
     const POD_BODY: &str = r#"{"kind":"Pod","apiVersion":"v1","metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app","image":"api:1"}]},"status":{"phase":"Running"}}"#;
     const EVENTS_BODY: &str = r#"{"kind":"EventList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"e1","namespace":"shop"},"involvedObject":{"kind":"Pod","name":"api-1"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container"}]}"#;
     const LOG_BODY: &str = "2026-01-01T00:00:00Z first line\n";
+    const OWNED_POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","uid":"u1","resourceVersion":"1","labels":{"app":"api"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"api-7f9c","uid":"r","controller":true}]},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"shop","name":"web-1","uid":"u2","resourceVersion":"1","labels":{"app":"web"}},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
+    const REPLICA_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"api-7f9c","namespace":"shop","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"api","uid":"d","controller":true}]},"spec":{"selector":{"matchLabels":{"app":"api","pod-template-hash":"7f9c"}}}}"#;
+    const DEPLOYMENT_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"api","namespace":"shop"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
 
     fn serve_pods(pod_list: &str) -> String {
         serve(Fixture {
@@ -1401,6 +1525,27 @@ mod tests {
             events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
             live_logs: None,
+            objects: Vec::new(),
+        })
+    }
+
+    fn serve_workloads() -> String {
+        serve(Fixture {
+            pod_list: OWNED_POD_LIST_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            objects: vec![
+                (
+                    "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c".into(),
+                    REPLICA_SET_BODY.into(),
+                ),
+                (
+                    "/apis/apps/v1/namespaces/shop/deployments/api".into(),
+                    DEPLOYMENT_BODY.into(),
+                ),
+            ],
         })
     }
 
@@ -1631,6 +1776,91 @@ users:
             assert_eq!(window.find("log-mode").label(), Some("Follow"));
         })
         .unwrap();
+    }
+
+    async fn wait_for_log_summary(handle: AnyWindowHandle, prefix: &str, cx: &mut TestAppContext) {
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window
+                .try_find("log-summary")
+                .and_then(|summary| summary.label().map(str::to_owned))
+                .is_some_and(|summary| summary.starts_with(prefix))
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn the_w_key_follows_the_selected_pods_deployment(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_workloads(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("j", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("details-title").label(), Some("api-1"));
+            window.press("w", cx);
+        })
+        .unwrap();
+
+        wait_for_log_summary(handle, "Following deployment/api · 1 pod · ", cx).await;
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            !window
+                .find_all_by_label("api-1/app 2026-01-01T00:00:00Z first line")
+                .is_empty()
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn the_palette_tails_a_typed_label_selector(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_workloads(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            window.input("app=web", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find_all_by_label("Tail pods matching app=web").len(),
+                1
+            );
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        wait_for_log_summary(handle, "Following app=web · 1 pod · ", cx).await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_pod_without_a_workload_says_so_in_the_log_dock(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_api(), "dev"));
+        let handle = open(contexts, cx);
+        wait_for_pods(handle, cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("w", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("log-summary").label(),
+                Some("Select a pod to tail its workload")
+            );
+            window.press("j", cx);
+            window.press("w", cx);
+        })
+        .unwrap();
+
+        wait_for_log_summary(handle, "api-1 has no workload to follow", cx).await;
     }
 
     #[gpui_kit::test]
@@ -2291,8 +2521,8 @@ users:
             ready: "1/1".into(),
             restarts: 0,
             node: "node-1".into(),
-            created_unix: None,
             containers: vec!["app".into()],
+            ..PodRow::default()
         })
     }
 
