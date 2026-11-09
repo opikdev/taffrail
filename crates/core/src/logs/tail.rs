@@ -106,8 +106,8 @@ impl Drop for LogTail {
 /// Reads stored lines. Lines stay readable after the tail is dropped, until the reader is.
 #[derive(Clone)]
 pub struct LogReader {
-    targets: Arc<RwLock<Vec<LogTarget>>>,
-    store: Arc<Mutex<LogStore>>,
+    pub(super) targets: Arc<RwLock<Vec<LogTarget>>>,
+    pub(super) store: Arc<Mutex<LogStore>>,
 }
 
 impl LogReader {

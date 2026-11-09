@@ -17,7 +17,7 @@ The signature element is the log timeline, a strip above the log lines that show
 | Network   | web-58d1     ● CrashLoop  0/1    4m  | Events        |  details
 | Config    |                                      | YAML          |
 | Cluster   +------------------------------------+-----------------+
-|           | Logs  Tailing 12 containers           Filter   Pause |
+|           | Logs  Tailing 12   312 of 4,210  Level  Filter Pause |
 |           | ▁▁▂▁▁▁▂▁▁▁▁▂▃█▇▂▁▁▁▂▁  timeline                      |  Log dock
 | ● v1.35.0 | 10:42:07  api-7f9c  ERROR  connection refused        |
 +-----------+------------------------------------------------------+
@@ -81,7 +81,21 @@ The signature element is the log timeline, a strip above the log lines that show
 - A pod that appears after a follow starts is read from its first line, up to 10,000 lines. Other pods start from their last 100 lines.
 - Lines from a pod that has left keep its name.
 - The view follows the newest lines until you scroll up or press **Pause**. Lines keep being stored while paused, and the button then reads **Follow (1,240 new)**.
-- Filters narrow the lines. Search highlights matches and keeps the surrounding lines.
+- The filter field and the severity picker in the dock header narrow the lines to those that match, across every line the tail has stored, not only those on screen. Search, which highlights matches and keeps the surrounding lines, is separate.
+- The filter checks the newest lines first and works back, so the view fills before the scan ends. New lines are checked as they arrive. The header counts what matches: **312 of 48,210 lines**, with **so far** until every stored line has been checked.
+- Filter terms must all match:
+
+  | Term | Matches |
+  |---|---|
+  | `refused`, `"connection refused"` | Lines that contain the text, ignoring case |
+  | `/refused\|reset/` | A regular expression, ignoring case unless it starts with `(?-i)` |
+  | `user_id=42`, `log.level=error` | JSON lines whose field equals the value, ignoring case, and other lines that contain `user_id=42`, as logfmt lines do |
+  | `source:checkout-api` | Lines from sources whose `pod/container` contains the text. Several `source:` terms match any of them |
+
+- Text is matched against the line as the container wrote it, without its Kubernetes timestamp.
+- A marked gap always shows, whatever the filter, because lines that may be missing could have matched.
+- The severity picker shows **All levels**, **INFO and above**, **WARN and above** or **ERROR only**. Lines with no severity show only under **All levels**.
+- The filter stays when a new tail starts. Pause and follow work the same with a filter, and a held position stays on its line when the filter changes.
 - The timeline bars are stacked by severity. Click a bar to jump there, or press `n` for the next error.
 - When a stream ends, the tail reconnects after 2 seconds and resumes after the last stored line. It asks for lines since that line's second, then skips those already stored, so a line is neither lost nor shown twice.
 - A container that restarted is read from where its previous run was left, then from the new run's first line, up to 10,000 lines.
@@ -99,6 +113,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
 | `/` | Filter the current view |
+| `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
 | `l` | Tail logs for the selection |
@@ -108,7 +123,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `e` | Show events |
 | `Space` | Pause or follow logs |
 | `n` / `Shift+N` | Next or previous error, from milestone 3 |
-| `Esc` | Clear the filter, then close the panel |
+| `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it |
 | `?` | Show all shortcuts |
 
 ## Command palette
@@ -133,6 +148,8 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | No permission | **You can't list Secrets in this namespace.** The rest of the app keeps working. |
 | No rows | **No pods in `payments`.** Offer **Show all namespaces**. |
 | No matches | **No pods match "web".** Offer **Clear filter**. |
+| No matching lines | **No lines match "timeout"**, or **No lines at ERROR** for a severity alone, once every stored line has been checked. Offer **Clear filter**, which also resets the severity. |
+| Invalid filter | **/(timeout/ is not a valid regular expression**, in `error` in place of the count. |
 | Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |
 | No workload | **debug-shell has no workload to follow.** Shown in the log dock, which keeps any running tail. |
 | Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the log dock. |

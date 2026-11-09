@@ -45,6 +45,16 @@ TAFFRAIL_SIM_CONTEXT=kwok-taffrail cargo test --release -p taffrail-core sim_rec
 
 It prints one JSON line with the lines stored and per second, the lines `lost` and `repeated` by each source's `seq` numbers, the `gaps` marked, and the `notes` Taffrail wrote, one per ended stream. `TAFFRAIL_SIM_SECONDS` sets the duration, 60 by default, and `TAFFRAIL_SIM_CUT_SECONDS` the interval, 10 by default or `0` for none. To test a restarted API server, run `docker restart kwok-taffrail-kube-apiserver` during a run.
 
+## Measure the log filter
+
+Fill a store with 1 GiB of mixed plain and JSON lines from 50 sources, then time text, regular expression, severity, JSON field and source filters over it:
+
+```sh
+cargo test --release -p taffrail-core filter_speed -- --ignored --nocapture
+```
+
+Each filter runs twice. It prints the time to the first match, to the first 50 matches, which fill the dock, and to the end of the scan, with the memory the matches take. The store has just been written, so the OS has its files cached, as it would in the app.
+
 ## Sample a running process
 
 On macOS, sample any process and its descendants:

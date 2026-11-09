@@ -350,6 +350,23 @@ impl Scene {
             .expect("preview window closed");
     }
 
+    fn set_log_filter(&mut self, query: &str, severity: usize) {
+        let (handle, root) = (self.handle, self.root.clone());
+        self.cx
+            .update_window(handle, |_, window, cx| {
+                root.update(cx, |root, cx| {
+                    root.set_log_filter(query, severity, window, cx)
+                });
+            })
+            .expect("preview window closed");
+        self.wait_until(|window, _| {
+            window
+                .try_find("log-filter-count")
+                .and_then(|count| count.label().map(|label| !label.ends_with("so far")))
+                .unwrap_or(false)
+        });
+    }
+
     fn save(&mut self, directory: &Path, name: &str) {
         let (handle, mode) = (self.handle, self.mode);
         // The headless window always reports a light system, which resets the theme on open.
@@ -502,7 +519,30 @@ pub fn run(directory: PathBuf) {
                 .is_some_and(|kept| kept >= POD_SUFFIXES.len() * 17)
         });
         scene.save(&directory, name);
+        if mode == ThemeMode::Dark {
+            scene.set_log_filter("", 3);
+            scene.save(&directory, "log-gap-filtered-dark.png");
+        }
     }
+
+    for (mode, name) in [
+        (ThemeMode::Dark, "log-filter-dark.png"),
+        (ThemeMode::Light, "log-filter-light.png"),
+    ] {
+        let mut scene = tailing(&server, mode);
+        scene.set_log_filter("postgres", 2);
+        scene.save(&directory, name);
+    }
+    let mut no_matches = tailing(&server, ThemeMode::Dark);
+    no_matches.set_log_filter("timeout", 0);
+    no_matches.save(&directory, "log-no-matches-dark.png");
+    let mut narrow_logs = connected_at(&server, ThemeMode::Dark, NARROW_WINDOW);
+    let root = narrow_logs.root.clone();
+    narrow_logs
+        .cx
+        .update(|cx| root.update(cx, |root, cx| root.tail_logs(cx)));
+    narrow_logs.set_log_filter("/refused|deprecated/", 0);
+    narrow_logs.save(&directory, "log-filter-narrow-dark.png");
 
     let mut collapsed = connected(&server, ThemeMode::Light);
     let root = collapsed.root.clone();

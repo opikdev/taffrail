@@ -17,18 +17,21 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, Contexts, Follow, LogTail, LogTarget, MAX_TAIL_PODS,
-    PodFeed, PodKey, PodSnapshot, SavedState, Selector,
+    Backend, ClusterError, Connection, Contexts, Follow, LogFilter, LogTail, LogTarget,
+    MAX_TAIL_PODS, PodFeed, PodKey, PodSnapshot, SavedState, Selector,
 };
 
 use crate::about::render_about;
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
-use crate::logs::{BAR_HEIGHT, LogPane, dock_height};
+use crate::logs::{
+    BAR_HEIGHT, LOG_FILTER_CONTEXT, LogControls, LogPane, ResetLogFilter, SEVERITY_CHOICES,
+    SeverityPicker, chosen_severity, dock_height,
+};
 use crate::palette::{
-    CloseWindow, FocusFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
-    ReloadContexts, ShowAbout, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext,
-    SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar,
-    groups, render_shortcuts,
+    CloseWindow, FocusFilter, FocusLogFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY,
+    PaletteSource, ReloadContexts, ShowAbout, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml,
+    SwitchContext, SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow,
+    ToggleSidebar, groups, render_shortcuts,
 };
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
@@ -44,6 +47,7 @@ actions!(
         PreviousRow,
         CloseDetails,
         ClearFilter,
+        ClearLogFilter,
         CloseOverlay
     ]
 );
@@ -89,6 +93,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CloseDetails, Some(TABLE_KEYS)),
         KeyBinding::new("enter", OpenSelected, Some(TABLE_KEYS)),
         KeyBinding::new("/", FocusFilter, Some(TABLE_KEYS)),
+        KeyBinding::new("f", FocusLogFilter, Some(TABLE_KEYS)),
         KeyBinding::new("l", TailSelection, Some(TABLE_KEYS)),
         KeyBinding::new("w", TailWorkload, Some(TABLE_KEYS)),
         KeyBinding::new("s", ShowSummary, Some(TABLE_KEYS)),
@@ -98,6 +103,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("?", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("shift-/", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("escape", ClearFilter, Some(FILTER_CONTEXT)),
+        KeyBinding::new("escape", ClearLogFilter, Some(LOG_FILTER_CONTEXT)),
         KeyBinding::new(OPEN_PALETTE_KEY, OpenPalette, Some(KEY_CONTEXT)),
         KeyBinding::new(TOGGLE_SIDEBAR_KEY, ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new(CLOSE_WINDOW_KEY, CloseWindow, Some(KEY_CONTEXT)),
@@ -197,6 +203,7 @@ pub struct Root {
     connection: Option<Connection>,
     pod_feed: Option<PodFeed>,
     logs: Option<Entity<LogPane>>,
+    log_controls: LogControls,
     /// Says what the log dock is waiting for, or why a tail could not start.
     log_note: Option<SharedString>,
     workload_task: Option<Task<()>>,
@@ -210,6 +217,7 @@ pub struct Root {
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
+    _log_filter_events: [Subscription; 2],
     _namespace_events: Subscription,
     _table_events: Subscription,
     _details_events: Option<Subscription>,
@@ -247,6 +255,7 @@ impl Root {
                 _ => {}
             },
         );
+        let (log_controls, log_filter_events) = log_controls(window, cx);
         let namespace_options = vec![ALL_NAMESPACES.to_owned()];
         let namespace_picker = cx.new(|cx| {
             let options = SearchableVec::new(namespace_options.clone());
@@ -297,6 +306,7 @@ impl Root {
             connection: None,
             pod_feed: None,
             logs: None,
+            log_controls,
             log_note: None,
             workload_task: None,
             details: None,
@@ -309,6 +319,7 @@ impl Root {
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
+            _log_filter_events: log_filter_events,
             _namespace_events: namespace_events,
             _table_events: table_events,
             _details_events: None,
@@ -479,7 +490,11 @@ impl Root {
         self.workload_task = None;
         self.log_note = None;
         match tail {
-            Ok(tail) => self.logs = Some(cx.new(|cx| LogPane::new(tail, cx))),
+            Ok(tail) => {
+                let controls = self.log_controls.clone();
+                let filter = self.log_filter(cx);
+                self.logs = Some(cx.new(|cx| LogPane::new(tail, controls, filter, cx)));
+            }
             Err(error) => self.set_log_note(Some(format!("Failed to start log tail: {error}")), cx),
         }
         cx.notify();
@@ -558,6 +573,24 @@ impl Root {
         self.pods.update(cx, |pods, cx| pods.scroll_to_row(row, cx));
     }
 
+    /// Types `query` in the log filter and picks the severity choice at `severity`.
+    #[cfg(feature = "preview")]
+    pub(crate) fn set_log_filter(
+        &mut self,
+        query: &str,
+        severity: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.log_controls
+            .query
+            .update(cx, |input, cx| input.set_value(query, window, cx));
+        self.log_controls.severity.update(cx, |picker, cx| {
+            picker.set_selected_index(Some(IndexPath::new(severity)), window, cx);
+        });
+        self.apply_log_filter(cx);
+    }
+
     #[cfg(feature = "preview")]
     pub(crate) fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.sidebar_collapsed = collapsed;
@@ -633,6 +666,34 @@ impl Root {
         }
         self.connect(context, window, cx);
         self.remember_state(window, cx);
+    }
+
+    /// The log filter the field and the severity picker spell.
+    fn log_filter(&self, cx: &App) -> LogFilter {
+        LogFilter {
+            query: self.log_controls.query.read(cx).value().to_string(),
+            severity: chosen_severity(self.log_controls.severity.read(cx).selected_value()),
+        }
+    }
+
+    fn apply_log_filter(&mut self, cx: &mut Context<Self>) {
+        let filter = self.log_filter(cx);
+        if let Some(logs) = &self.logs {
+            logs.update(cx, |logs, cx| logs.set_filter(filter, cx));
+        }
+    }
+
+    /// Clears the log filter's text, and its severity too if `severity`.
+    fn clear_log_filter(&mut self, severity: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.log_controls
+            .query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+        if severity {
+            self.log_controls.severity.update(cx, |picker, cx| {
+                picker.set_selected_index(Some(IndexPath::default()), window, cx);
+            });
+        }
+        self.apply_log_filter(cx);
     }
 
     fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1219,6 +1280,33 @@ fn pod_status(summary: &str, snapshot: &PodSnapshot) -> String {
     }
 }
 
+/// The log dock's filter field and severity picker, and the subscriptions that apply them.
+fn log_controls(window: &mut Window, cx: &mut Context<Root>) -> (LogControls, [Subscription; 2]) {
+    let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter lines"));
+    let severity = cx.new(|cx| {
+        let choices = SEVERITY_CHOICES.map(|(label, _)| label).to_vec();
+        SeverityPicker::new(choices, Some(IndexPath::default()), window, cx)
+    });
+    let query_events = cx.subscribe_in(
+        &query,
+        window,
+        |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Change => this.apply_log_filter(cx),
+            InputEvent::PressEnter { .. } => this.focus_handle.focus(window, cx),
+            _ => {}
+        },
+    );
+    let severity_events = cx.subscribe_in(
+        &severity,
+        window,
+        |this, _, _: &SelectEvent<Vec<&'static str>>, _, cx| this.apply_log_filter(cx),
+    );
+    (
+        LogControls { query, severity },
+        [query_events, severity_events],
+    )
+}
+
 /// Fits the picker to the context name, as the title bar has no use for a wide control.
 fn context_picker_width(context: &str) -> f32 {
     let text = context.chars().count() as f32 * CONTEXT_PICKER_CHAR_WIDTH;
@@ -1351,6 +1439,22 @@ impl Render for Root {
                     this.focus_handle.focus(window, cx);
                 } else {
                     this.clear_filter(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ClearLogFilter, window, cx| {
+                if this.log_controls.query.read(cx).value().is_empty() {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    this.clear_log_filter(false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ResetLogFilter, window, cx| {
+                this.clear_log_filter(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusLogFilter, window, cx| {
+                this.close_overlays(window, cx);
+                if this.logs.is_some() {
+                    this.log_controls.query.focus_handle(cx).focus(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenSelected, _, cx| this.open_selected(cx)))
@@ -1885,6 +1989,190 @@ users:
                     .len(),
                 1
             );
+        })
+        .unwrap();
+    }
+
+    async fn tail_severity_lines(cx: &mut TestAppContext) -> AnyWindowHandle {
+        cx.executor().allow_parking();
+        let server = serve_pods_with_logs(POD_LIST_BODY, SEVERITY_LOG_BODY);
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find(("log-line", 2u64)).is_some()
+        })
+        .await;
+        handle
+    }
+
+    const ERROR_LINE: &str = "api-1/app ERROR 2026-01-01T00:00:00Z ERROR payment failed";
+    const WARN_LINE: &str = r#"api-1/app WARN 2026-01-01T00:00:01Z {"level":"warn","ts":1.7e9,"msg":"slow query","ms":1204}"#;
+    const DEBUG_LINE: &str = r#"api-1/app DEBUG 2026-01-01T00:00:02Z {"level":"debug","seq":3}"#;
+
+    /// The fake server's tail reconnects and sends its lines again, so tests look at which
+    /// lines show rather than how many.
+    fn shows(window: &gpui_kit::Window, line: &str) -> bool {
+        !window.find_all_by_label(line).is_empty()
+    }
+
+    /// The `matches of lines` count, once every stored line has been checked.
+    fn finished_count(window: &gpui_kit::Window) -> Option<(u64, u64)> {
+        let label = window.try_find("log-filter-count")?.label()?.to_owned();
+        let (matches, lines) = label.strip_suffix(" lines")?.split_once(" of ")?;
+        Some((
+            matches.replace(',', "").parse().ok()?,
+            lines.replace(',', "").parse().ok()?,
+        ))
+    }
+
+    async fn wait_for_filter(
+        handle: AnyWindowHandle,
+        cx: &mut TestAppContext,
+        done: impl Fn(&gpui_kit::Window, (u64, u64)) -> bool,
+    ) {
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            finished_count(window).is_some_and(|count| done(window, count))
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn the_f_key_filters_log_lines_across_the_tail(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.try_find("log-filter-count").is_none());
+            window.press("f", cx);
+            window.input("PAYMENT", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |window, (matches, lines)| {
+            matches > 0 && matches < lines && shows(window, ERROR_LINE) && !shows(window, WARN_LINE)
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("log-filter-count").is_none() && shows(window, WARN_LINE)
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_json_field_and_a_severity_narrow_the_lines(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click("log-filter", cx);
+            window.input("ms=1204", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |window, _| {
+            shows(window, WARN_LINE) && !shows(window, ERROR_LINE) && !shows(window, DEBUG_LINE)
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.press("escape", cx);
+            window.render_frame(cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
+            window.within("log-severity-picker").click("input", cx);
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |window, _| {
+            shows(window, WARN_LINE) && shows(window, ERROR_LINE) && !shows(window, DEBUG_LINE)
+        })
+        .await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find("log-severity-picker").value(),
+                Some("WARN and above")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_filter_with_no_matches_offers_to_clear_it(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("f", cx);
+            window.input("timeout", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |window, (matches, _)| {
+            matches == 0 && window.try_find("log-notice").is_some()
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(
+                window.find("log-notice").label(),
+                Some("No lines match \"timeout\"")
+            );
+            window.click("log-clear-filter", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("log-notice").is_none()
+                && window.try_find("log-filter-count").is_none()
+                && shows(window, DEBUG_LINE)
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn an_invalid_regular_expression_says_so(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("f", cx);
+            window.input("/(payment/", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window
+                .try_find("log-filter-count")
+                .and_then(|count| count.label().map(str::to_owned))
+                == Some("/(payment/ is not a valid regular expression".to_owned())
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_filtered_tail_still_pauses_and_follows(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("f", cx);
+            window.input("/slow|payment/", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |window, _| {
+            shows(window, WARN_LINE) && shows(window, ERROR_LINE) && !shows(window, DEBUG_LINE)
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Pause"));
+            window.press("space", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Follow"));
+            assert!(shows(window, ERROR_LINE) && !shows(window, DEBUG_LINE));
+            window.press("space", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Pause"));
         })
         .unwrap();
     }
