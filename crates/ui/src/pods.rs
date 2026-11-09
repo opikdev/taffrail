@@ -537,6 +537,7 @@ mod tests {
             node: "node-1".into(),
             created_unix: Some(created),
             containers: vec!["app".into()],
+            ..PodRow::default()
         })
     }
 

@@ -3,6 +3,7 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
+use taffrail_core::Following;
 
 use crate::root::Root;
 
@@ -10,6 +11,7 @@ const HIDDEN_WINDOW: &str =
     "Invalid run: frames stopped. Check the connection, and keep the window uncovered";
 const SECONDS_VARIABLE: &str = "TAFFRAIL_BENCH_SECONDS";
 const TAIL_VARIABLE: &str = "TAFFRAIL_BENCH_TAIL";
+const FOLLOW_VARIABLE: &str = "TAFFRAIL_BENCH_FOLLOW";
 const DEFAULT_SECONDS: u64 = 30;
 const ROWS_PER_FRAME: usize = 3;
 const READY_POLL: Duration = Duration::from_millis(100);
@@ -62,7 +64,12 @@ pub fn run((window, root): (AnyWindowHandle, Entity<Root>), cx: &mut App) {
             }
             cx.background_executor().timer(READY_POLL).await;
         };
-        if env::var(TAIL_VARIABLE).as_deref() != Ok("0") {
+        if let Some(selector) = env::var(FOLLOW_VARIABLE)
+            .ok()
+            .filter(|text| !text.is_empty())
+        {
+            root.update(cx, |root, cx| root.follow_selector(&selector, cx));
+        } else if env::var(TAIL_VARIABLE).as_deref() != Ok("0") {
             root.update(cx, |root, cx| root.tail_logs(cx));
         }
         cx.background_executor().timer(SETTLE).await;
@@ -101,7 +108,8 @@ fn measure_next_frame(mut run: Run, window: &mut Window, _: &mut App) {
                 eprintln!("{HIDDEN_WINDOW}");
                 process::exit(1);
             }
-            println!("{}", report(run.intervals));
+            let logs = run.root.read(cx).log_stats(cx);
+            println!("{}", report(run.intervals, logs));
             cx.quit();
             return;
         }
@@ -112,7 +120,9 @@ fn measure_next_frame(mut run: Run, window: &mut Window, _: &mut App) {
     });
 }
 
-fn report(mut intervals: Vec<Duration>) -> String {
+/// Frame times, then how many containers a tail has streamed in all and how many pods it
+/// follows now, which shows pods joining and leaving during rollouts.
+fn report(mut intervals: Vec<Duration>, logs: Option<(usize, Option<Following>, u64)>) -> String {
     let frames = intervals.len();
     let over = |limit: u64| {
         intervals
@@ -123,8 +133,17 @@ fn report(mut intervals: Vec<Duration>) -> String {
     let (over_17ms, over_33ms) = (over(17), over(33));
     intervals.sort_unstable();
     let percentile = |percent: usize| intervals[(frames - 1) * percent / 100].as_secs_f64() * 1000.;
+    let logs = logs.map_or_else(String::new, |(sources, following, lines)| {
+        let followed = following.map_or_else(String::new, |following| {
+            format!(
+                r#","followed_pods":{},"matching_pods":{}"#,
+                following.pods, following.matching
+            )
+        });
+        format!(r#","log_sources":{sources},"log_lines":{lines}{followed}"#)
+    });
     format!(
-        r#"{{"frames":{frames},"p50_ms":{:.2},"p95_ms":{:.2},"p99_ms":{:.2},"max_ms":{:.2},"over_17ms":{over_17ms},"over_33ms":{over_33ms}}}"#,
+        r#"{{"frames":{frames},"p50_ms":{:.2},"p95_ms":{:.2},"p99_ms":{:.2},"max_ms":{:.2},"over_17ms":{over_17ms},"over_33ms":{over_33ms}{logs}}}"#,
         percentile(50),
         percentile(95),
         percentile(99),

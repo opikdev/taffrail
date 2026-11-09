@@ -34,7 +34,7 @@ scripts/sim-cluster.sh churn
 
 | Variable | Default | Description |
 |---|---|---|
-| `SIM_CLUSTER` | `taffrail` | Cluster name; the context is `kwok-<name>` |
+| `SIM_CLUSTER` | `taffrail` | Cluster name; the context is `kwok-<name>`. Clusters with different names can run together |
 | `SIM_NODES` | `100` | Fake nodes, each holding up to 110 pods |
 | `SIM_PODS` | `5000` | Fake pods |
 | `SIM_LOG_RATE` | `200` | Lines per second in the shared log file |
@@ -58,6 +58,6 @@ Measured 2026-11-07 on an M-series Mac with 16 GB of memory and 8 cores, with Or
 
 ## Limits
 
-- All pods share one log file, so their log content is identical. Lines are JSON with `seq`, `level`, `route`, `status` and `ms` fields.
+- All pods in a cluster share one log file, so their log content is identical. A pod that joins a followed tail reads that file from its start, up to the 10,000-line cap. Lines are JSON with `seq`, `level`, `route`, `status` and `ms` fields.
 - Simulated pods do not reflect real workload behaviour. Use a real cluster to validate the log path before launch.
 - The log file must stay in the Docker VM. On a file shared from macOS, KWOK logs `Received unexpected fsnotify event` and `kubectl logs -f` delivers no new lines.

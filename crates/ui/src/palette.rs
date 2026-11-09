@@ -5,7 +5,7 @@ use gpui_kit::component::command::{CommandGroup, CommandItem};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{PodKey, PodRow};
+use taffrail_core::{PodKey, PodRow, Selector};
 
 use crate::pods::urgency;
 use crate::windows::NewWindow;
@@ -24,6 +24,7 @@ actions!(
         FocusFilter,
         OpenSelected,
         TailSelection,
+        TailWorkload,
         ShowSummary,
         ShowEvents,
         ShowYaml,
@@ -53,13 +54,21 @@ pub struct OpenPod {
     pub key: PodKey,
 }
 
+/// Follows the pods that a label selector matches, in the chosen namespace.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct TailSelector {
+    pub selector: SharedString,
+}
+
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 15] = [
+pub const SHORTCUTS: [(&str, &str); 16] = [
     (MODIFIER_K, "Open the command palette"),
     ("/", "Filter pods"),
     ("j  k", "Move through rows"),
     ("Enter", "Open details"),
     ("l", "Tail logs for the selection"),
+    ("w", "Tail the selected pod's workload"),
     ("y", "Show YAML"),
     ("e", "Show events"),
     ("s", "Show summary"),
@@ -112,6 +121,15 @@ pub struct PaletteSource<'a> {
     pub has_selection: bool,
     pub has_tail: bool,
     pub connected: bool,
+}
+
+/// The selector a search spells, such as `app=api` or `tier in (web)`. A bare word
+/// would parse as "has this label", so it only counts with an operator.
+pub fn typed_selector(query: &str) -> Option<Selector> {
+    let operator = ["=", "!", " in ", " notin "]
+        .iter()
+        .any(|operator| query.contains(operator));
+    operator.then(|| Selector::parse(query).ok()).flatten()
 }
 
 /// Up to `MAX_POD_RESULTS` pods matching `query`, with those that need attention first.
@@ -174,6 +192,36 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
     ));
     if source.connected {
         actions = actions.item(command("Tail logs", IconName::ScrollText, TailSelection));
+    }
+    if source.connected && source.has_selection {
+        actions = actions.item(
+            command("Tail its workload", IconName::ScrollText, TailWorkload).keywords([
+                "follow",
+                "deployment",
+                "statefulset",
+                "daemonset",
+                "job",
+                "replicaset",
+                "rollout",
+            ]),
+        );
+    }
+    if source.connected
+        && let Some(selector) = typed_selector(source.query)
+    {
+        let label = match source.namespace {
+            Some(namespace) => format!("Tail pods matching {selector} in {namespace}"),
+            None => format!("Tail pods matching {selector}"),
+        };
+        actions = actions.item(
+            CommandItem::new()
+                .label(label)
+                .icon(Icon::new(IconName::ScrollText))
+                .keywords([source.query.to_owned()])
+                .action(Box::new(TailSelector {
+                    selector: selector.to_string().into(),
+                })),
+        );
     }
     if source.has_tail {
         actions = actions.item(command(
@@ -290,7 +338,7 @@ mod tests {
 
     use taffrail_core::PodRow;
 
-    use super::{MAX_POD_RESULTS, matching_pods};
+    use super::{MAX_POD_RESULTS, matching_pods, typed_selector};
 
     fn row(namespace: &str, name: &str) -> Arc<PodRow> {
         with_status(namespace, name, "Running")
@@ -304,9 +352,28 @@ mod tests {
             ready: "1/1".into(),
             restarts: 0,
             node: "node-1".into(),
-            created_unix: None,
             containers: vec!["app".into()],
+            ..PodRow::default()
         })
+    }
+
+    #[test]
+    fn a_search_with_an_operator_is_a_selector() {
+        let typed = |query| typed_selector(query).map(|selector| selector.to_string());
+        assert_eq!(typed("app=checkout").as_deref(), Some("app=checkout"));
+        assert_eq!(
+            typed("tier in (web, db)").as_deref(),
+            Some("tier in (db,web)")
+        );
+        assert_eq!(typed("!canary").as_deref(), Some("!canary"));
+    }
+
+    #[test]
+    fn a_plain_search_is_not_a_selector() {
+        assert!(typed_selector("checkout").is_none());
+        assert!(typed_selector("checkout api").is_none());
+        assert!(typed_selector("app=").is_some());
+        assert!(typed_selector("a=b c").is_none());
     }
 
     #[test]

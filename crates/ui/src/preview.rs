@@ -126,8 +126,9 @@ fn pod_list(created: &str) -> String {
                 "Waiting" => format!(r#"{{"waiting":{{"reason":"{reason}"}}}}"#),
                 _ => format!(r#"{{"terminated":{{"exitCode":0,"reason":"{reason}"}}}}"#),
             };
+            let app = app_label(name);
             items.push(format!(
-                r#"{{"metadata":{{"namespace":"{namespace}","name":"{name}-{suffix}","resourceVersion":"1","creationTimestamp":"{created}"}},"spec":{{"nodeName":"{node}","containers":[{{"name":"app"}}]}},"status":{{"phase":"{phase}","containerStatuses":[{{"name":"app","image":"app","imageID":"app","ready":{ready},"restartCount":{restarts},"state":{state}}}]}}}}"#
+                r#"{{"metadata":{{"namespace":"{namespace}","name":"{name}-{suffix}","uid":"{name}-{suffix}","resourceVersion":"1","creationTimestamp":"{created}","labels":{{"app":"{app}"}},"ownerReferences":[{{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"{name}","uid":"{name}","controller":true}}]}},"spec":{{"nodeName":"{node}","containers":[{{"name":"app"}}]}},"status":{{"phase":"{phase}","containerStatuses":[{{"name":"app","image":"app","imageID":"app","ready":{ready},"restartCount":{restarts},"state":{state}}}]}}}}"#
             ));
         }
     }
@@ -135,6 +136,33 @@ fn pod_list(created: &str) -> String {
         r#"{{"kind":"PodList","apiVersion":"v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
         items.join(",")
     )
+}
+
+/// The `app` label of a workload's pods: its name without the ReplicaSet hash.
+fn app_label(name: &str) -> &str {
+    name.rsplit_once('-')
+        .filter(|(_, hash)| hash.len() >= 5 && hash.chars().any(|char| char.is_ascii_digit()))
+        .map_or(name, |(app, _)| app)
+}
+
+/// The ReplicaSets of the `checkout-api` rollout and their Deployment, for following it.
+fn workload_objects() -> Vec<(String, String)> {
+    let replica_set = |hash: &str| {
+        (
+            format!("/apis/apps/v1/namespaces/payments/replicasets/checkout-api-{hash}"),
+            format!(
+                r#"{{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{{"name":"checkout-api-{hash}","namespace":"payments","ownerReferences":[{{"apiVersion":"apps/v1","kind":"Deployment","name":"checkout-api","uid":"d","controller":true}}]}},"spec":{{"selector":{{"matchLabels":{{"app":"checkout-api","pod-template-hash":"{hash}"}}}}}}}}"#
+            ),
+        )
+    };
+    vec![
+        replica_set("7f9c6d"),
+        replica_set("5b8d44"),
+        (
+            "/apis/apps/v1/namespaces/payments/deployments/checkout-api".to_owned(),
+            r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"checkout-api","namespace":"payments"},"spec":{"selector":{"matchLabels":{"app":"checkout-api"}},"template":{}}}"#.to_owned(),
+        ),
+    ]
 }
 
 fn pod_body(created: &str) -> String {
@@ -349,6 +377,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: log_body(),
         live_logs: None,
+        objects: workload_objects(),
     });
     assert!(WORKLOADS.len() * POD_SUFFIXES.len() > MAX_TAIL_PODS);
 
@@ -358,6 +387,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: String::new(),
         live_logs: Some(&LOG_LINES),
+        objects: workload_objects(),
     });
     let mut readme = connected(&live, ThemeMode::Dark);
     readme.set_namespace("payments");
@@ -414,6 +444,22 @@ pub fn run(directory: PathBuf) {
         })
         .expect("preview window closed");
     details.save(&directory, "details-yaml-dark.png");
+
+    let mut follow = connected(&server, ThemeMode::Dark);
+    let root = follow.root.clone();
+    follow.cx.update(|cx| {
+        root.update(cx, |root, cx| {
+            root.select_first_row(cx);
+            root.tail_workload(cx);
+        })
+    });
+    follow.wait_until(|window, _| {
+        window.find("log-summary").label().is_some_and(|summary| {
+            summary.starts_with("Following deployment/checkout-api")
+                && !summary.ends_with(" 0 lines kept")
+        })
+    });
+    follow.save(&directory, "follow-dark.png");
 
     let mut palette = connected(&server, ThemeMode::Dark);
     let handle = palette.handle;

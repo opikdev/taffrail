@@ -12,7 +12,8 @@ context="kwok-$cluster"
 generator="kwok-$cluster-gen-logs"
 # Must live inside the Docker VM. Files on the macOS share emit combined
 # fsnotify events that KWOK rejects, which silently breaks `kubectl logs -f`.
-log_dir="/var/lib/taffrail-sim"
+# Each cluster has its own file, so clusters with different names can run together.
+log_dir="/var/lib/taffrail-sim/$cluster"
 k() { kubectl --context="$context" "$@"; }
 
 up() {
@@ -23,7 +24,7 @@ up() {
   docker run --rm -v "$log_dir:$log_dir" python:3.13-alpine \
     sh -c "rm -f $log_dir/app.log && touch $log_dir/app.log"
 
-  cat > "$sim/kwok.yaml" <<YAML
+  cat > "$sim/kwok-$cluster.yaml" <<YAML
 kind: ClusterLogs
 apiVersion: kwok.x-k8s.io/v1alpha1
 metadata:
@@ -35,7 +36,7 @@ spec:
     follow: true
 YAML
 
-  kwokctl create cluster --name="$cluster" --config="$sim/kwok.yaml" --disable-qps-limits
+  kwokctl create cluster --name="$cluster" --config="$sim/kwok-$cluster.yaml" --disable-qps-limits
   if [ -n "$previous" ]; then
     kubectl config use-context "$previous" >/dev/null
   fi
@@ -52,6 +53,7 @@ YAML
 down() {
   docker rm -f "$generator" >/dev/null 2>&1 || true
   kwokctl delete cluster --name="$cluster"
+  docker run --rm -v "$(dirname "$log_dir"):/sim" python:3.13-alpine rm -rf "/sim/$cluster"
 }
 
 churn() {

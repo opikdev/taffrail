@@ -5,12 +5,12 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{LogLine, LogProgress, LogReader, LogTail};
+use taffrail_core::{Following, LogLine, LogProgress, LogReader, LogTail};
 
 use crate::pods::format_count;
 
 const LINE_HEIGHT: f32 = 20.;
-const BAR_HEIGHT: f32 = 40.;
+pub const BAR_HEIGHT: f32 = 40.;
 const TIME_WIDTH: f32 = 60.;
 const SOURCE_WIDTH: f32 = 210.;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -32,6 +32,7 @@ pub struct LogPane {
     top: u64,
     following: bool,
     scrolled_lines: f32,
+    note: Option<SharedString>,
     _updates: Task<()>,
 }
 
@@ -56,8 +57,25 @@ impl LogPane {
             top: 0,
             following: true,
             scrolled_lines: 0.,
+            note: None,
             _updates: updates,
         }
+    }
+
+    /// Shows `note` in place of the summary, such as while a workload is found.
+    pub fn set_note(&mut self, note: Option<SharedString>, cx: &mut Context<Self>) {
+        self.note = note;
+        cx.notify();
+    }
+
+    /// The containers this tail has followed, and the lines it holds.
+    #[cfg(feature = "bench")]
+    pub fn stats(&self) -> (usize, Option<Following>, u64) {
+        (
+            self.reader.source_count(),
+            self.progress.following.clone(),
+            self.progress.end,
+        )
     }
 
     fn held(&self) -> Range<u64> {
@@ -87,8 +105,7 @@ impl LogPane {
 
     fn source_label(&self, line: &LogLine) -> String {
         self.reader
-            .targets()
-            .get(line.source as usize)
+            .target(line.source)
             .map(|target| format!("{}/{}", target.pod, target.container))
             .unwrap_or_default()
     }
@@ -149,6 +166,33 @@ fn line_summary(containers: usize, lines: u64) -> String {
     )
 }
 
+/// Names what a follow tails, and says when the pod limit leaves pods out.
+fn follow_summary(following: &Following, lines: u64) -> String {
+    let pods = match (following.pods, following.matching) {
+        (0, _) => "no pods yet".to_owned(),
+        (1, 1) => "1 pod".to_owned(),
+        (pods, matching) if matching > pods => {
+            format!(
+                "{pods} of {} pods, the most a tail follows",
+                format_count(matching)
+            )
+        }
+        (pods, _) => format!("{pods} pods"),
+    };
+    format!(
+        "Following {} · {pods} · {} lines kept",
+        following.label,
+        format_count(lines as usize)
+    )
+}
+
+fn progress_summary(progress: &LogProgress, lines: u64) -> String {
+    match &progress.following {
+        Some(following) => follow_summary(following, lines),
+        None => line_summary(progress.containers, lines),
+    }
+}
+
 fn last_top(held: &Range<u64>, rows: u64) -> u64 {
     held.end.saturating_sub(rows).max(held.start)
 }
@@ -174,8 +218,12 @@ impl Render for LogPane {
             .err()
             .map(|error| format!("Failed to read log lines: {error}"))
             .or_else(|| self.progress.error.clone());
-        let summary = error
-            .unwrap_or_else(|| line_summary(self.reader.targets().len(), held.end - held.start));
+        let summary = self
+            .note
+            .as_ref()
+            .map(ToString::to_string)
+            .or(error)
+            .unwrap_or_else(|| progress_summary(&self.progress, held.end - held.start));
         let following = self.following;
         v_flex()
             .id("logs")
@@ -237,7 +285,9 @@ impl Render for LogPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_top, line_summary, scrolled_top, split_time};
+    use taffrail_core::Following;
+
+    use super::{follow_summary, last_top, line_summary, scrolled_top, split_time};
 
     #[test]
     fn splits_the_time_from_a_kubernetes_timestamp() {
@@ -260,6 +310,42 @@ mod tests {
         assert_eq!(
             line_summary(50, 604_780),
             "Tailing 50 containers, 604,780 lines kept"
+        );
+    }
+
+    fn following(pods: usize, matching: usize) -> Following {
+        Following {
+            label: "deployment/checkout-api".into(),
+            pods,
+            matching,
+        }
+    }
+
+    #[test]
+    fn a_follow_names_its_source_and_counts_pods() {
+        assert_eq!(
+            follow_summary(&following(6, 6), 1_240),
+            "Following deployment/checkout-api · 6 pods · 1,240 lines kept"
+        );
+        assert_eq!(
+            follow_summary(&following(1, 1), 0),
+            "Following deployment/checkout-api · 1 pod · 0 lines kept"
+        );
+    }
+
+    #[test]
+    fn a_follow_says_when_it_has_no_pods() {
+        assert_eq!(
+            follow_summary(&following(0, 0), 12),
+            "Following deployment/checkout-api · no pods yet · 12 lines kept"
+        );
+    }
+
+    #[test]
+    fn a_follow_says_when_the_limit_leaves_pods_out() {
+        assert_eq!(
+            follow_summary(&following(50, 1_200), 5),
+            "Following deployment/checkout-api · 50 of 1,200 pods, the most a tail follows · 5 lines kept"
         );
     }
 

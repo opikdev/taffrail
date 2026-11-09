@@ -8,10 +8,13 @@ use kube::config::{KubeConfigOptions, Kubeconfig, KubeconfigError};
 use kube::{Client, Config};
 use tokio::runtime::{self, Runtime};
 
+use std::sync::Arc;
+
 use crate::details::{self, PodDetails};
 use crate::environment::{self, ShellEnvironment};
+use crate::follow::{self, Follow};
 use crate::logs::{self, LogTail, LogTarget};
-use crate::pods::{self, PodWatch};
+use crate::pods::{self, PodFeed, PodRow, PodWatch};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_THREADS: usize = 2;
@@ -39,6 +42,12 @@ pub enum ClusterError {
     },
     #[error("Failed to read pod {pod}: {error}")]
     PodDetails { pod: String, error: String },
+    #[error("{pod} has no workload to follow")]
+    NoWorkload { pod: String },
+    #[error("Following a {workload} is not supported")]
+    UnsupportedWorkload { workload: String },
+    #[error("Failed to read {workload}: {error}")]
+    ReadWorkload { workload: String, error: String },
 }
 
 /// The contexts in the user's kubeconfig.
@@ -123,7 +132,7 @@ impl Contexts {
         self
     }
 
-    async fn connect(self, context: String) -> Result<Connection, ClusterError> {
+    pub(crate) async fn connect(self, context: String) -> Result<Connection, ClusterError> {
         let options = KubeConfigOptions {
             context: Some(context.clone()),
             ..KubeConfigOptions::default()
@@ -179,7 +188,7 @@ fn read_kubeconfig(environment: &ShellEnvironment) -> Result<Kubeconfig, Kubecon
 pub struct Connection {
     pub context: String,
     pub server_version: String,
-    client: Client,
+    pub(crate) client: Client,
 }
 
 /// Runs cluster work on its own threads, away from the UI executor.
@@ -242,6 +251,36 @@ impl Backend {
     ) -> io::Result<LogTail> {
         let _runtime = self.runtime.enter();
         logs::start(connection.client.clone(), targets)
+    }
+
+    /// Finds the workload that controls `pod`, such as its Deployment, to follow its pods.
+    pub fn workload_of(
+        &self,
+        connection: &Connection,
+        pod: Arc<PodRow>,
+    ) -> impl Future<Output = Result<Follow, ClusterError>> + use<> {
+        let workload = format!("the workload of {}", pod.name);
+        let task = self
+            .runtime
+            .spawn(follow::resolve(connection.client.clone(), pod));
+        async move {
+            task.await.map_err(|error| ClusterError::ReadWorkload {
+                workload,
+                error: error.to_string(),
+            })?
+        }
+    }
+
+    /// Tails the pods that `follow` matches as `feed` changes, until the returned tail is
+    /// dropped. Pods join as they appear and leave when they are deleted.
+    pub fn follow_logs(
+        &self,
+        connection: &Connection,
+        feed: PodFeed,
+        follow: Follow,
+    ) -> io::Result<LogTail> {
+        let _runtime = self.runtime.enter();
+        logs::follow(connection.client.clone(), feed, follow)
     }
 }
 
