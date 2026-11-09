@@ -1376,6 +1376,7 @@ mod tests {
             pod: POD_BODY.into(),
             events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
+            live_logs: None,
         })
     }
 
