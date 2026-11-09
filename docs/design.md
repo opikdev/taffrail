@@ -67,6 +67,11 @@ The signature element is the log timeline, a strip above the log lines that show
 ## Log explorer
 
 - Each line shows time, source, severity and text. Long lines clip by default, and **Wrap lines** wraps them.
+- The time is the Kubernetes timestamp of the line, as `HH:MM:SS` in local time. Lines Taffrail writes itself, such as **tail ended**, have no time.
+- The severity shows as a word in a status colour: **ERROR** in `error`, **WARN** in `warning`, **INFO** in `info`, and **DEBUG** in `muted`. Lines with no severity leave the column blank.
+- Severity comes from a JSON level field, such as `level`, `severity`, `lvl`, `levelname`, `log.level`, or a bunyan or pino number. Plain lines are read from their first 256 bytes: a whole uppercase word such as `ERROR`, a logfmt `level=error`, a bracketed `[error]` or `[core:error]`, a klog `E1107` prefix, or a message that starts `error:`. The first match wins. Error includes fatal, critical and panic, and debug includes trace.
+- A JSON line with a `msg`, `message` or `@message` field shows that message, then its other fields as `key=value` in `muted`. Level and time fields are left out, because their columns show them. A JSON line without a message, or that is not valid JSON, shows as written.
+- The stored line stays as the container wrote it, with its Kubernetes timestamp, and the screen reader label reads it whole.
 - The source column is hidden when you follow one pod.
 - Sources get a stable colour from a fixed set, and always keep their name.
 - **Tail its workload**, or `w`, follows the selected pod's controller: a Deployment, StatefulSet, DaemonSet, Job or ReplicaSet. A pod owned by a ReplicaSet follows the ReplicaSet's Deployment, so a rollout's new ReplicaSet is included.

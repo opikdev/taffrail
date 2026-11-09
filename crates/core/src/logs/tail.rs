@@ -13,7 +13,7 @@ use kube::{Api, Client};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
-use super::store::{LogLine, LogStore};
+use super::store::{LogLine, LogStore, Record};
 use crate::follow::{Follow, Member};
 use crate::pods::{PodFeed, PodKey, PodSnapshot};
 
@@ -30,8 +30,6 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const NOT_FOUND: u16 = 404;
 /// Each line stores its source as a `u16`.
 const MAX_SOURCES: usize = u16::MAX as usize + 1;
-
-type SourceLine = (u16, Vec<u8>);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LogTarget {
@@ -131,7 +129,7 @@ struct Running {
 /// keep their name after it leaves.
 struct Sources {
     client: Client,
-    lines: mpsc::Sender<SourceLine>,
+    lines: mpsc::Sender<Record>,
     targets: Arc<RwLock<Vec<LogTarget>>>,
     ids: HashMap<LogTarget, u16>,
     running: HashMap<u16, Running>,
@@ -139,7 +137,7 @@ struct Sources {
 }
 
 impl Sources {
-    fn new(client: Client, lines: mpsc::Sender<SourceLine>) -> Self {
+    fn new(client: Client, lines: mpsc::Sender<Record>) -> Self {
         Self {
             client,
             lines,
@@ -228,7 +226,7 @@ impl Sources {
 struct OpenStore {
     store: Arc<Mutex<LogStore>>,
     /// Where to send lines for the writer to store.
-    lines: mpsc::Sender<SourceLine>,
+    lines: mpsc::Sender<Record>,
     progress_sender: Arc<watch::Sender<LogProgress>>,
     progress: watch::Receiver<LogProgress>,
 }
@@ -349,7 +347,7 @@ async fn follow_pods(
 }
 
 fn write_lines(
-    mut lines: mpsc::Receiver<SourceLine>,
+    mut lines: mpsc::Receiver<Record>,
     store: Arc<Mutex<LogStore>>,
     progress: &watch::Sender<LogProgress>,
 ) {
@@ -384,7 +382,7 @@ async fn follow_target(
     source: u16,
     target: LogTarget,
     from_start: bool,
-    lines: mpsc::Sender<SourceLine>,
+    lines: mpsc::Sender<Record>,
 ) {
     let mut params = LogParams {
         container: Some(target.container.clone()),
@@ -410,7 +408,7 @@ async fn follow_target(
         let note = format!("[taffrail: {reason}]");
         if last_note.as_ref() != Some(&note) {
             if lines
-                .send((source, note.clone().into_bytes()))
+                .send(Record::note(source, note.clone().into_bytes()))
                 .await
                 .is_err()
             {
@@ -435,7 +433,7 @@ async fn follow_stream(
     pod: &str,
     params: &LogParams,
     source: u16,
-    lines: &mpsc::Sender<SourceLine>,
+    lines: &mpsc::Sender<Record>,
     opened: &mut bool,
 ) -> Result<(), kube::Error> {
     let stream = pods.log_stream(pod, params).await?;
@@ -448,8 +446,10 @@ async fn follow_stream(
             Ok(false) => return Ok(()),
             Err(error) => return Err(kube::Error::ReadEvents(error)),
         }
+        // Each stream finds its own lines' severity, so the work spreads across the
+        // runtime's threads and stays out of the store's lock.
         if lines
-            .send((source, std::mem::take(&mut line)))
+            .send(Record::new(source, std::mem::take(&mut line)))
             .await
             .is_err()
         {
@@ -544,7 +544,7 @@ mod tests {
     }
 
     fn writer() -> (
-        mpsc::Sender<SourceLine>,
+        mpsc::Sender<Record>,
         Arc<Mutex<LogStore>>,
         watch::Receiver<LogProgress>,
         thread::JoinHandle<()>,
@@ -563,7 +563,10 @@ mod tests {
 
         for index in 0..5_000u32 {
             lines
-                .send(((index % 50) as u16, index.to_string().into_bytes()))
+                .send(Record::new(
+                    (index % 50) as u16,
+                    index.to_string().into_bytes(),
+                ))
                 .await
                 .unwrap();
         }

@@ -7429,6 +7429,7 @@ dependencies = [
 name = "taffrail-ui"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "gpui-kit",
  "image",
  "taffrail-core",

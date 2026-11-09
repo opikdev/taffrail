@@ -24,6 +24,16 @@ Each run scrolls the pod table three rows per frame while pods churn: once alone
 
 Pass a duration in seconds to change the default of 20: `scripts/bench.sh 60`. For a cluster started with another `SIM_CLUSTER`, pass the same name: `SIM_CLUSTER=m3 scripts/bench.sh`.
 
+## Measure the log parser
+
+Time finding the severity and timestamp of a million lines in common formats:
+
+```sh
+cargo test --release -p taffrail-core _speed -- --ignored --nocapture --test-threads=1
+```
+
+`parse_speed` prints the time per line. `store_speed` prints the time to find severities, store, read, and find them again on read, and the share of disk the stored severity takes.
+
 ## Sample a running process
 
 On macOS, sample any process and its descendants:
