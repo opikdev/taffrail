@@ -2,12 +2,14 @@
 
 mod cluster;
 mod details;
+mod environment;
 mod logs;
 mod pods;
 mod state;
 
 pub use cluster::{Backend, ClusterError, Connection, Contexts};
 pub use details::{ContainerDetails, PodDetails, PodEvent};
+pub use environment::use_login_shell_environment;
 pub use logs::{LogLine, LogProgress, LogReader, LogTail, LogTarget, MAX_TAIL_PODS};
 pub use pods::{PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use state::{SavedState, WindowRect, state_path};
