@@ -1,3 +1,4 @@
+mod about;
 #[cfg(feature = "bench")]
 mod bench;
 mod details;
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::assets::AllAssets;
-use taffrail_core::{Backend, Contexts};
+use taffrail_core::{APP_ID, APP_NAME, Backend, Contexts};
 
 fn main() {
     #[cfg(feature = "preview")]
@@ -30,6 +31,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(AllAssets)
         .run(move |cx| {
+            cx.set_app_identity(APP_ID, APP_NAME);
             gpui_kit::init(cx);
             theme::init(cx);
             root::init(cx);

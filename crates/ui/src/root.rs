@@ -20,11 +20,12 @@ use taffrail_core::{
     SavedState,
 };
 
+use crate::about::render_about;
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
 use crate::logs::{LogPane, dock_height};
 use crate::palette::{
     CloseWindow, FocusFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
-    ReloadContexts, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext,
+    ReloadContexts, ShowAbout, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext,
     SwitchNamespace, TailSelection, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
@@ -74,6 +75,7 @@ const PALETTE_WIDTH: f32 = 560.;
 const PALETTE_TOP: f32 = 96.;
 const PALETTE_HEIGHT: f32 = 380.;
 const SHORTCUTS_WIDTH: f32 = 420.;
+const ABOUT_WIDTH: f32 = 320.;
 
 /// Binds the keys that act on the pod table when no text field has focus.
 pub fn init(cx: &mut App) {
@@ -120,6 +122,13 @@ pub fn titlebar_options() -> TitlebarOptions {
         appears_transparent: true,
         traffic_light_position: Some(point(px(14.), px(13.))),
     }
+}
+
+/// A sheet shown over the panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sheet {
+    Shortcuts,
+    About,
 }
 
 enum Session {
@@ -186,7 +195,7 @@ pub struct Root {
     logs: Option<Entity<LogPane>>,
     details: Option<Entity<DetailsPane>>,
     palette: Option<Entity<CommandState>>,
-    shortcuts_open: bool,
+    sheet: Option<Sheet>,
     focus_handle: FocusHandle,
     session: Session,
     sidebar_collapsed: bool,
@@ -282,7 +291,7 @@ impl Root {
             logs: None,
             details: None,
             palette: None,
-            shortcuts_open: false,
+            sheet: None,
             focus_handle,
             session: Session::ChooseContext,
             sidebar_collapsed,
@@ -548,13 +557,21 @@ impl Root {
         let palette = cx.new(|cx| CommandState::new(window, cx));
         palette.update(cx, |palette, cx| palette.focus(window, cx));
         self.palette = Some(palette);
-        self.shortcuts_open = false;
+        self.sheet = None;
         cx.notify();
+    }
+
+    /// Runs after a palette command, which may itself have opened a sheet or moved focus.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
     }
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
-        self.shortcuts_open = false;
+        self.sheet = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -924,7 +941,7 @@ impl Root {
             .empty(|_, _, _| div().p_4().text_sm().child("No matches"))
             .on_query(move |_, _, cx| root.update(cx, |_, cx| cx.notify()))
             .on_confirm(move |_, window, cx| {
-                closing.update(cx, |root, cx| root.close_overlays(window, cx));
+                closing.update(cx, |root, cx| root.close_palette(window, cx));
             });
         for group in entries {
             command = command.group(group);
@@ -1207,7 +1224,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseDetails, window, cx| {
-                if this.shortcuts_open {
+                if this.sheet.is_some() {
                     this.close_overlays(window, cx);
                 } else {
                     this.close_details(cx);
@@ -1229,7 +1246,11 @@ impl Render for Root {
             }))
             .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
                 this.close_overlays(window, cx);
-                this.shortcuts_open = true;
+                this.sheet = Some(Sheet::Shortcuts);
+            }))
+            .on_action(cx.listener(|this, _: &ShowAbout, window, cx| {
+                this.close_overlays(window, cx);
+                this.sheet = Some(Sheet::About);
             }))
             .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
                 this.close_overlays(window, cx);
@@ -1289,9 +1310,12 @@ impl Render for Root {
             .when_some(self.palette.clone(), |root, palette| {
                 root.child(deferred(self.render_palette(&palette, cx)).priority(1))
             })
-            .when(self.shortcuts_open, |root| {
-                let shortcuts = render_shortcuts(cx).into_any_element();
-                root.child(deferred(render_overlay(SHORTCUTS_WIDTH, shortcuts, cx)).priority(1))
+            .when_some(self.sheet, |root, sheet| {
+                let (width, content) = match sheet {
+                    Sheet::Shortcuts => (SHORTCUTS_WIDTH, render_shortcuts(cx).into_any_element()),
+                    Sheet::About => (ABOUT_WIDTH, render_about(cx).into_any_element()),
+                };
+                root.child(deferred(render_overlay(width, content, cx)).priority(1))
             })
             .child(
                 h_flex()
@@ -1896,6 +1920,36 @@ users:
             window.press("escape", cx);
             window.render_frame(cx);
             assert!(window.try_find("shortcuts").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_palette_opens_about_with_the_version(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            window.input("about", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+            assert_eq!(window.find("about-version").label(), Some(version.as_str()));
+            assert!(window.try_find("about-repository").is_some());
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_none());
         })
         .unwrap();
     }

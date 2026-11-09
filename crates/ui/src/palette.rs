@@ -20,6 +20,7 @@ actions!(
     [
         OpenPalette,
         ShowShortcuts,
+        ShowAbout,
         FocusFilter,
         OpenSelected,
         TailSelection,
@@ -203,7 +204,8 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
             "Show all shortcuts",
             IconName::Keyboard,
             ShowShortcuts,
-        ));
+        ))
+        .item(command("About Taffrail", IconName::Info, ShowAbout));
 
     let pods = matching_pods(source.rows, source.query);
     let mut groups = Vec::new();
