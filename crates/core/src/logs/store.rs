@@ -3,12 +3,53 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use super::parse::{Severity, line_severity, split_timestamp};
+use k8s_openapi::jiff::Timestamp;
+
+use super::parse::{Severity, line_severity, parse_rfc3339, split_timestamp};
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 16;
 const INDEX_STRIDE: u64 = 256;
 const HEADER_BYTES: usize = size_of::<u16>() + size_of::<u8>() + size_of::<u32>();
+/// Set in the severity byte of a record that says lines may be missing.
+const GAP_FLAG: u8 = 0x80;
+const GAP_PREFIX: &str = "[taffrail: lines may be missing from ";
+const GAP_SEPARATOR: &str = " to ";
+
+/// A time range in which a source's lines may be missing, in nanoseconds since the
+/// Unix epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gap {
+    pub from: i64,
+    pub to: i64,
+}
+
+impl Gap {
+    fn text(self) -> Vec<u8> {
+        format!(
+            "{GAP_PREFIX}{}{GAP_SEPARATOR}{}]",
+            rfc3339(self.from),
+            rfc3339(self.to)
+        )
+        .into_bytes()
+    }
+
+    fn parse(text: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(text).ok()?;
+        let range = text.strip_prefix(GAP_PREFIX)?.strip_suffix(']')?;
+        let (from, to) = range.split_once(GAP_SEPARATOR)?;
+        Some(Self {
+            from: parse_rfc3339(from.as_bytes())?,
+            to: parse_rfc3339(to.as_bytes())?,
+        })
+    }
+}
+
+fn rfc3339(unix_nanos: i64) -> String {
+    Timestamp::from_nanosecond(i128::from(unix_nanos))
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_string()
+}
 
 /// One log line and the position it arrived in across all sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +62,8 @@ pub struct LogLine {
     pub timestamp: Option<i64>,
     /// The line as stored, with its Kubernetes timestamp.
     pub text: String,
+    /// Set on the line Taffrail writes when this source's lines may be missing.
+    pub gap: Option<Gap>,
 }
 
 impl LogLine {
@@ -38,6 +81,7 @@ impl LogLine {
 pub(super) struct Record {
     pub source: u16,
     pub severity: Severity,
+    pub gap: bool,
     pub text: Vec<u8>,
 }
 
@@ -47,6 +91,7 @@ impl Record {
         Self {
             source,
             severity: line_severity(&text),
+            gap: false,
             text,
         }
     }
@@ -56,7 +101,18 @@ impl Record {
         Self {
             source,
             severity: Severity::Unknown,
+            gap: false,
             text,
+        }
+    }
+
+    /// A line Taffrail writes when lines from `source` may be missing.
+    pub fn gap(source: u16, gap: Gap) -> Self {
+        Self {
+            source,
+            severity: Severity::Unknown,
+            gap: true,
+            text: gap.text(),
         }
     }
 }
@@ -107,7 +163,15 @@ impl Segment {
         let mut seq = self.first_seq + first_block * INDEX_STRIDE;
         let mut rest = encoded.as_slice();
         while seq < range.end {
-            let (source, severity, text, remaining) = decode(rest)?;
+            let (
+                Decoded {
+                    source,
+                    severity,
+                    gap,
+                    text,
+                },
+                remaining,
+            ) = decode(rest)?;
             if seq >= range.start {
                 lines.push(LogLine {
                     seq,
@@ -115,6 +179,7 @@ impl Segment {
                     severity,
                     timestamp: split_timestamp(text).0,
                     text: String::from_utf8_lossy(text).into_owned(),
+                    gap: gap.then(|| Gap::parse(text)).flatten(),
                 });
             }
             rest = remaining;
@@ -126,23 +191,42 @@ impl Segment {
 
 fn encode(record: &Record, encoded: &mut Vec<u8>) {
     encoded.extend_from_slice(&record.source.to_le_bytes());
-    encoded.push(record.severity.to_byte());
+    let gap = if record.gap { GAP_FLAG } else { 0 };
+    encoded.push(record.severity.to_byte() | gap);
     encoded.extend_from_slice(&(record.text.len() as u32).to_le_bytes());
     encoded.extend_from_slice(&record.text);
 }
 
-fn decode(encoded: &[u8]) -> io::Result<(u16, Severity, &[u8], &[u8])> {
+/// One stored record, still borrowing its text.
+struct Decoded<'a> {
+    source: u16,
+    severity: Severity,
+    gap: bool,
+    text: &'a [u8],
+}
+
+/// Decodes the first record, and returns it with the bytes after it.
+fn decode(encoded: &[u8]) -> io::Result<(Decoded<'_>, &[u8])> {
     let truncated = || io::Error::new(io::ErrorKind::InvalidData, "Truncated log record");
     let (header, rest) = encoded
         .split_at_checked(HEADER_BYTES)
         .ok_or_else(truncated)?;
     let source = u16::from_le_bytes([header[0], header[1]]);
-    let severity = Severity::from_byte(header[2]);
+    let severity = Severity::from_byte(header[2] & !GAP_FLAG);
+    let gap = header[2] & GAP_FLAG != 0;
     let length = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
     let (text, rest) = rest
         .split_at_checked(length as usize)
         .ok_or_else(truncated)?;
-    Ok((source, severity, text, rest))
+    Ok((
+        Decoded {
+            source,
+            severity,
+            gap,
+            text,
+        },
+        rest,
+    ))
 }
 
 /// Log lines kept on disk in unnamed temporary files, which the OS removes on close.
@@ -258,26 +342,56 @@ mod tests {
                     source: 0,
                     severity: Severity::Error,
                     timestamp: Some(1_794_048_126_500_000_000),
-                    text: "2026-11-07T10:42:06.5Z ERROR boom".into()
+                    text: "2026-11-07T10:42:06.5Z ERROR boom".into(),
+                    gap: None,
                 },
                 LogLine {
                     seq: 1,
                     source: 1,
                     severity: Severity::Warning,
                     timestamp: None,
-                    text: r#"{"level":"warn"}"#.into()
+                    text: r#"{"level":"warn"}"#.into(),
+                    gap: None,
                 },
                 LogLine {
                     seq: 2,
                     source: 2,
                     severity: Severity::Unknown,
                     timestamp: None,
-                    text: "[taffrail: ERROR tail ended]".into()
+                    text: "[taffrail: ERROR tail ended]".into(),
+                    gap: None,
                 },
             ]
         );
         assert_eq!(read[0].message(), "ERROR boom");
         assert_eq!(read[1].message(), r#"{"level":"warn"}"#);
+    }
+
+    #[test]
+    fn a_gap_reads_back_with_its_time_range() {
+        let mut store = LogStore::new().unwrap();
+        let gap = Gap {
+            from: 1_794_048_126_118_000_000,
+            to: 1_794_048_151_000_000_000,
+        };
+        store
+            .append(&[
+                Record::gap(4, gap),
+                Record::note(4, b"[taffrail: lines may be missing from x to y]".to_vec()),
+            ])
+            .unwrap();
+
+        let read = store.read(0..2).unwrap();
+
+        assert_eq!(read[0].gap, Some(gap));
+        assert_eq!(read[0].source, 4);
+        assert_eq!(read[0].severity, Severity::Unknown);
+        assert_eq!(read[0].timestamp, None);
+        assert_eq!(
+            read[0].text,
+            "[taffrail: lines may be missing from 2026-11-07T10:42:06.118Z to 2026-11-07T10:42:31Z]"
+        );
+        assert_eq!(read[1].gap, None, "only Taffrail marks a gap");
     }
 
     #[test]

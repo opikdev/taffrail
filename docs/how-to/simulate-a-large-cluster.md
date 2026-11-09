@@ -60,4 +60,5 @@ Measured 2026-11-07 on an M-series Mac with 16 GB of memory and 8 cores, with Or
 
 - All pods in a cluster share one log file, so their log content is identical. A pod that joins a followed tail reads that file from its start, up to the 10,000-line cap. Lines are JSON with `seq`, `level`, `route`, `status` and `ms` fields.
 - Simulated pods do not reflect real workload behaviour. Use a real cluster to validate the log path before launch.
+- KWOK keeps no previous container logs and reports no container IDs, so container restarts cannot be simulated. Unit tests cover them with a fake API server.
 - The log file must stay in the Docker VM. On a file shared from macOS, KWOK logs `Received unexpected fsnotify event` and `kubectl logs -f` delivers no new lines.

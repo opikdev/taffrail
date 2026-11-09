@@ -17,6 +17,7 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `pods-dark.png` | The pod table alone |
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
 | `log-formats-dark.png`, `log-formats-light.png` | A tail of plain, logfmt, klog, nginx and JSON lines, with their severities |
+| `log-gap-dark.png`, `log-gap-light.png` | A tail whose logs rotated while it reconnected, with the missing lines marked |
 | `follow-dark.png` | A tail following the selected pod's Deployment across two ReplicaSets |
 | `palette-dark.png`, `palette-search-dark.png` | The command palette, empty and searching |
 | `shortcuts-light.png` | The shortcut sheet |

@@ -16,7 +16,7 @@ pub use details::{ContainerDetails, PodDetails, PodEvent};
 pub use environment::use_login_shell_environment;
 pub use follow::Follow;
 pub use logs::{
-    Following, JsonLine, LogLine, LogProgress, LogReader, LogTail, LogTarget, MAX_TAIL_PODS,
+    Following, Gap, JsonLine, LogLine, LogProgress, LogReader, LogTail, LogTarget, MAX_TAIL_PODS,
     Severity, json_line,
 };
 pub use pods::{Owner, PodFeed, PodKey, PodRow, PodSnapshot, PodWatch, log_targets};

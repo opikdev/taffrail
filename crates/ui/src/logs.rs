@@ -6,7 +6,9 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, Theme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{Following, LogLine, LogProgress, LogReader, LogTail, Severity, json_line};
+use taffrail_core::{
+    Following, Gap, LogLine, LogProgress, LogReader, LogTail, Severity, json_line,
+};
 
 use crate::pods::format_count;
 
@@ -15,6 +17,7 @@ pub const BAR_HEIGHT: f32 = 40.;
 const TIME_WIDTH: f32 = 60.;
 const SOURCE_WIDTH: f32 = 210.;
 const SEVERITY_WIDTH: f32 = 40.;
+const GAP_INSET: f32 = 8.;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const DOCK_SHARE: f32 = 0.42;
 const MINIMUM_DOCK_HEIGHT: f32 = 160.;
@@ -70,13 +73,14 @@ impl LogPane {
         cx.notify();
     }
 
-    /// The containers this tail has followed, and the lines it holds.
+    /// The containers this tail has followed, the lines it holds, and a reader for them.
     #[cfg(feature = "bench")]
-    pub fn stats(&self) -> (usize, Option<Following>, u64) {
+    pub fn stats(&self) -> (usize, Option<Following>, u64, LogReader) {
         (
             self.reader.source_count(),
             self.progress.following.clone(),
             self.progress.end,
+            self.reader.clone(),
         )
     }
 
@@ -112,7 +116,35 @@ impl LogPane {
             .unwrap_or_default()
     }
 
-    fn render_line(&self, line: LogLine, cx: &App) -> impl IntoElement {
+    /// A full-width row in place of the columns, so a gap reads apart from lines.
+    fn render_gap(&self, line: &LogLine, gap: Gap, cx: &App) -> AnyElement {
+        let source = self.source_label(line);
+        let text = gap_text(gap, &Local);
+        let theme = cx.theme();
+        h_flex()
+            .id(("log-line", line.seq))
+            .test_support()
+            .aria_label(format!("{source} {text}"))
+            .h(px(LINE_HEIGHT))
+            .flex_shrink_0()
+            .gap_3()
+            // The band reaches into the padding, so its text lines up with the times.
+            .mx(px(-GAP_INSET))
+            .px(px(GAP_INSET))
+            .rounded_sm()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .bg(theme.muted)
+            .text_color(theme.muted_foreground)
+            .child(text)
+            .child(source)
+            .into_any_element()
+    }
+
+    fn render_line(&self, line: LogLine, cx: &App) -> AnyElement {
+        if let Some(gap) = line.gap {
+            return self.render_gap(&line, gap, cx);
+        }
         let source = self.source_label(&line);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -180,7 +212,17 @@ impl LogPane {
                         row.child(div().text_color(muted).child(fields))
                     }),
             )
+            .into_any_element()
     }
+}
+
+/// What a gap row says, with times of day in `zone`.
+pub(crate) fn gap_text(gap: Gap, zone: &impl TimeZone<Offset: std::fmt::Display>) -> String {
+    format!(
+        "Lines may be missing from {} to {}",
+        clock_time(gap.from, zone),
+        clock_time(gap.to, zone)
+    )
 }
 
 /// The wall-clock `HH:MM:SS` of a timestamp in `zone`.
@@ -332,11 +374,11 @@ impl Render for LogPane {
 
 #[cfg(test)]
 mod tests {
-    use taffrail_core::Following;
+    use taffrail_core::{Following, Gap};
 
     use chrono::{FixedOffset, Utc};
 
-    use super::{clock_time, follow_summary, last_top, line_summary, scrolled_top};
+    use super::{clock_time, follow_summary, gap_text, last_top, line_summary, scrolled_top};
 
     const NOV_7_2026_10_42_06_NANOS: i64 = 1_794_048_126_118_000_000;
 
@@ -347,6 +389,19 @@ mod tests {
         assert_eq!(clock_time(NOV_7_2026_10_42_06_NANOS, &india), "16:12:06");
         let new_york = FixedOffset::west_opt(5 * 3_600).unwrap();
         assert_eq!(clock_time(NOV_7_2026_10_42_06_NANOS, &new_york), "05:42:06");
+    }
+
+    #[test]
+    fn a_gap_names_the_time_range_that_may_be_missing() {
+        let gap = Gap {
+            from: NOV_7_2026_10_42_06_NANOS,
+            to: NOV_7_2026_10_42_06_NANOS + 25_000_000_000,
+        };
+
+        assert_eq!(
+            gap_text(gap, &Utc),
+            "Lines may be missing from 10:42:06 to 10:42:31"
+        );
     }
 
     #[test]

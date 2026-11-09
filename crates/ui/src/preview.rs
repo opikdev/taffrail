@@ -242,8 +242,14 @@ fn log_body() -> String {
 
 /// `count` lines from `lines`, one second apart from 10:42.
 fn stamped(lines: &[&str], count: usize) -> String {
+    stamped_from(lines, count, 0)
+}
+
+/// `count` lines from `lines`, one second apart from `first` seconds after 10:42.
+fn stamped_from(lines: &[&str], count: usize, first: usize) -> String {
     let mut body = String::new();
     for (ix, line) in lines.iter().cycle().take(count).enumerate() {
+        let ix = ix + first;
         let (minute, second) = (42 + ix / 60, ix % 60);
         writeln!(body, "2026-11-07T10:{minute:02}:{second:02}.118Z {line}").unwrap();
     }
@@ -400,6 +406,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: log_body(),
         live_logs: None,
+        reconnect_logs: None,
         objects: workload_objects(),
     });
     assert!(WORKLOADS.len() * POD_SUFFIXES.len() > MAX_TAIL_PODS);
@@ -410,6 +417,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: String::new(),
         live_logs: Some(&LOG_LINES),
+        reconnect_logs: None,
         objects: workload_objects(),
     });
     let mut readme = connected(&live, ThemeMode::Dark);
@@ -441,6 +449,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: stamped(&FORMAT_LINES, FORMAT_LINES.len()),
         live_logs: None,
+        reconnect_logs: None,
         objects: workload_objects(),
     });
     for (mode, name) in [
@@ -458,6 +467,39 @@ pub fn run(directory: PathBuf) {
                 .find("log-summary")
                 .label()
                 .is_some_and(|summary| !summary.ends_with(" 0 lines kept"))
+        });
+        scene.save(&directory, name);
+    }
+
+    for (mode, name) in [
+        (ThemeMode::Dark, "log-gap-dark.png"),
+        (ThemeMode::Light, "log-gap-light.png"),
+    ] {
+        // The log rotates while the stream is down, so lines from 10:42:05 to 10:42:31
+        // are lost. A server serves one scene, because it counts each pod's requests.
+        let rotated = serve(Fixture {
+            pod_list: pod_list(created),
+            pod: pod_body(created),
+            events: events_body(),
+            logs: stamped(&FORMAT_LINES, 6),
+            live_logs: None,
+            objects: workload_objects(),
+            reconnect_logs: Some(stamped_from(&FORMAT_LINES[6..], 8, 31)),
+        });
+        let mut scene = connected(&rotated, mode);
+        scene.set_namespace("ingress");
+        let root = scene.root.clone();
+        scene
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.tail_logs(cx)));
+        scene.wait_until(|window, _| {
+            window
+                .find("log-summary")
+                .label()
+                .and_then(|summary| summary.strip_suffix(" lines kept")?.rsplit(' ').next())
+                .and_then(|kept| kept.replace(',', "").parse::<usize>().ok())
+                // Each pod's first lines, two notes, the gap and the lines after it.
+                .is_some_and(|kept| kept >= POD_SUFFIXES.len() * 17)
         });
         scene.save(&directory, name);
     }

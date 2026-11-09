@@ -72,7 +72,7 @@ fn digits(bytes: &[u8]) -> Option<i64> {
 }
 
 /// Parses `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`, the form the kubelet writes.
-fn parse_rfc3339(stamp: &[u8]) -> Option<i64> {
+pub(super) fn parse_rfc3339(stamp: &[u8]) -> Option<i64> {
     if stamp.len() < "2026-11-07T10:42:06Z".len()
         || stamp[4] != b'-'
         || stamp[7] != b'-'

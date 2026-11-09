@@ -538,7 +538,12 @@ impl Root {
     pub(crate) fn log_stats(
         &self,
         cx: &App,
-    ) -> Option<(usize, Option<taffrail_core::Following>, u64)> {
+    ) -> Option<(
+        usize,
+        Option<taffrail_core::Following>,
+        u64,
+        taffrail_core::LogReader,
+    )> {
         Some(self.logs.as_ref()?.read(cx).stats())
     }
 
@@ -1499,6 +1504,7 @@ mod tests {
 
     use super::{OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice, pod_status, tail_label};
     use crate::fake_api::{Fixture, kubeconfig, serve};
+    use crate::logs::gap_text;
     use crate::pods::PodTable;
 
     use gpui_kit::component::table::TableDelegate;
@@ -1507,7 +1513,7 @@ mod tests {
         AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds,
         WindowOptions, px, size,
     };
-    use taffrail_core::{Backend, Contexts, LogTarget, PodRow, PodSnapshot, SavedState};
+    use taffrail_core::{Backend, Contexts, Gap, LogTarget, PodRow, PodSnapshot, SavedState};
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const TWO_NAMESPACES_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
@@ -1536,6 +1542,7 @@ mod tests {
             events: EVENTS_BODY.into(),
             logs: logs.into(),
             live_logs: None,
+            reconnect_logs: None,
             objects: Vec::new(),
         })
     }
@@ -1547,6 +1554,7 @@ mod tests {
             events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
             live_logs: None,
+            reconnect_logs: None,
             objects: vec![
                 (
                     "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c".into(),
@@ -1835,6 +1843,47 @@ users:
                 window.find(("log-text", 2u64)).label(),
                 Some(r#"{"level":"debug","seq":3}"#),
                 "a JSON line without a message shows as written"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn lines_lost_across_a_reconnect_show_as_a_marked_gap(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve(Fixture {
+            pod_list: POD_LIST_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: "2026-01-01T00:00:00Z first\n2026-01-01T00:00:06Z second\n".into(),
+            live_logs: None,
+            objects: Vec::new(),
+            reconnect_logs: Some("2026-01-01T00:00:31Z after\n".into()),
+        });
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+        let gap = Gap {
+            from: 1_767_225_606_000_000_000,
+            to: 1_767_225_631_000_000_000,
+        };
+        let label = format!("api-1/app {}", gap_text(gap, &chrono::Local));
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            !window.find_all_by_label(&label).is_empty()
+        })
+        .await;
+
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window
+                    .find_all_by_label("api-1/app 2026-01-01T00:00:31Z after")
+                    .len(),
+                1
             );
         })
         .unwrap();
