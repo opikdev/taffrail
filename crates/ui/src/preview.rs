@@ -559,7 +559,7 @@ pub fn run(directory: PathBuf) {
         }
     }
 
-    let timeline = |mode| {
+    let timeline_at = |mode, size| {
         // The stream drops at 10:47 and the log rotates, so a minute is marked missing.
         let server = serve(Fixture {
             pod_list: pod_list(created),
@@ -570,7 +570,7 @@ pub fn run(directory: PathBuf) {
             objects: workload_objects(),
             reconnect_logs: Some(timeline_body(360..600)),
         });
-        let mut scene = connected(&server, mode);
+        let mut scene = connected_at(&server, mode, size);
         scene.set_namespace("ingress");
         let root = scene.root.clone();
         scene
@@ -582,6 +582,7 @@ pub fn run(directory: PathBuf) {
         });
         scene
     };
+    let timeline = |mode| timeline_at(mode, WINDOW);
     for (mode, name) in [
         (ThemeMode::Dark, "log-timeline-dark.png"),
         (ThemeMode::Light, "log-timeline-light.png"),
@@ -601,6 +602,37 @@ pub fn run(directory: PathBuf) {
             scene.set_log_filter("refused", 0);
             scene.save(&directory, "log-timeline-filtered-dark.png");
         }
+    }
+    for (mode, name, size) in [
+        (ThemeMode::Dark, "log-context-dark.png", WINDOW),
+        (ThemeMode::Light, "log-context-light.png", WINDOW),
+        (
+            ThemeMode::Dark,
+            "log-context-narrow-dark.png",
+            NARROW_WINDOW,
+        ),
+    ] {
+        let mut scene = timeline_at(mode, size);
+        scene.set_log_filter("refused", 0);
+        let (handle, root) = (scene.handle, scene.root.clone());
+        scene
+            .cx
+            .update_window(handle, |_, window, cx| {
+                root.update(cx, |root, cx| root.set_log_context(1, window, cx));
+            })
+            .expect("preview window closed");
+        scene
+            .cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.press("shift-n", cx);
+                window.press("shift-n", cx);
+                window.render_frame(cx);
+                window.press("shift-down", cx);
+                window.press("shift-down", cx);
+            })
+            .expect("preview window closed");
+        scene.save(&directory, name);
     }
 
     for (mode, name) in [

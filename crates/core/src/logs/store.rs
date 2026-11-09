@@ -391,8 +391,18 @@ impl LogStore {
     /// Reads the lines with these sequence numbers, which must be in ascending order.
     /// Lines already dropped are left out.
     pub(super) fn read_seqs(&self, seqs: &[u64]) -> io::Result<Vec<LogLine>> {
-        let held = self.range();
         let mut lines = Vec::with_capacity(seqs.len());
+        self.each_seq(seqs, |seq, record| lines.push(log_line(seq, record)))?;
+        Ok(lines)
+    }
+
+    /// Calls `visit` with each held record of `seqs`, which must be in ascending order.
+    pub(super) fn each_seq(
+        &self,
+        seqs: &[u64],
+        mut visit: impl FnMut(u64, Decoded),
+    ) -> io::Result<()> {
+        let held = self.range();
         let mut encoded = Vec::new();
         let mut wanted = seqs
             .iter()
@@ -406,13 +416,27 @@ impl LogStore {
             let first = segment.encoded(seq..block_end, &mut encoded)?;
             each_record(first, &encoded, seq..block_end, |at, record| {
                 if wanted.next_if_eq(&at).is_some() {
-                    lines.push(log_line(at, record));
+                    visit(at, record);
                 }
             })?;
             // A number out of order is skipped rather than read again.
             wanted.next_if_eq(&seq);
         }
-        Ok(lines)
+        Ok(())
+    }
+
+    /// Appends the sequence number and source of each held line in `range` to `out`,
+    /// reading only their headers.
+    pub(super) fn sources(&self, range: Range<u64>, out: &mut Vec<(u64, u16)>) -> io::Result<()> {
+        let mut range = range;
+        let mut encoded = Vec::new();
+        while let Some(read) = self.read_encoded(range.clone(), &mut encoded)? {
+            each_record(read.first, &encoded, read.covered.clone(), |seq, record| {
+                out.push((seq, record.source));
+            })?;
+            range.start = read.covered.end;
+        }
+        Ok(())
     }
 
     /// Bytes on disk, for measuring.

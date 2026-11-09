@@ -308,8 +308,8 @@ pub struct FilterProgress {
 }
 
 #[derive(Default)]
-struct Found {
-    matches: MatchSet,
+pub(super) struct Found {
+    pub(super) matches: MatchSet,
     /// The matches counted over time, and the matching error lines.
     timeline: Timeline,
     /// The lines checked: older lines are added below, and new lines above.
@@ -427,8 +427,8 @@ impl Scanner {
 /// A running filter over a tail's stored lines, which keeps up as lines arrive. Dropping
 /// it stops the scan.
 pub struct LogFilterScan {
-    reader: LogReader,
-    found: Arc<Mutex<Found>>,
+    pub(super) reader: LogReader,
+    pub(super) found: Arc<Mutex<Found>>,
     progress: watch::Receiver<FilterProgress>,
     _cancel: oneshot::Sender<()>,
 }

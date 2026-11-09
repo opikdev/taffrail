@@ -262,6 +262,10 @@ impl MatchSet {
         rank
     }
 
+    pub(super) fn contains(&self, seq: u64) -> bool {
+        self.rank(seq + 1) > self.rank(seq)
+    }
+
     /// The sequence numbers of matches `positions`, in order.
     pub(super) fn select(&self, positions: std::ops::Range<usize>) -> Vec<u64> {
         let mut out = Vec::with_capacity(positions.len().min(self.len));

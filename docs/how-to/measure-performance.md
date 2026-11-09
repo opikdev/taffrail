@@ -45,6 +45,17 @@ cargo test --release -p taffrail-core timeline_speed -- --ignored --nocapture
 
 It prints the time to count each line as it is stored, the memory the counts take, and the time to build the bars the dock shows.
 
+## Measure log exports
+
+Fill a store with 1 GiB of lines from 50 sources, then time exporting all of them, the matches of a filter, and the matches with 10 lines of context:
+
+```sh
+cargo test --release -p taffrail-core --no-run
+/usr/bin/time -l target/release/deps/taffrail_core-<hash> export_speed --ignored --nocapture
+```
+
+`cargo test --no-run` prints the test binary's path. Running it under `/usr/bin/time -l` on macOS, or `/usr/bin/time -v` on Linux, adds the process's peak memory, which shows that an export streams rather than loading the store.
+
 ## Measure log reconnects
 
 Tail 50 simulated pods through a local proxy that cuts every connection at an interval, without opening a window:

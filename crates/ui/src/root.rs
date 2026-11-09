@@ -24,14 +24,17 @@ use taffrail_core::{
 use crate::about::render_about;
 use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
 use crate::logs::{
-    BAR_HEIGHT, LOG_FILTER_CONTEXT, LogControls, LogPane, ResetLogFilter, SEVERITY_CHOICES,
-    SeverityPicker, chosen_severity, dock_height,
+    BAR_HEIGHT, CONTEXT_CHOICES, ClearLineSelection, ExtendNextLine, ExtendPreviousLine,
+    LOG_FILTER_CONTEXT, LOG_LINES_CONTEXT, LineContextPicker, LogControls, LogPane, ResetLogFilter,
+    SEVERITY_CHOICES, SelectNextLine, SelectPreviousLine, SeverityPicker, chosen_context,
+    chosen_severity, dock_height,
 };
 use crate::palette::{
-    CloseWindow, FocusFilter, FocusLogFilter, NextError, OpenPalette, OpenPod, OpenSelected,
-    PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts, ShowAbout, ShowEvents,
-    ShowShortcuts, ShowSummary, ShowYaml, SwitchContext, SwitchNamespace, TailSelection,
-    TailSelector, TailWorkload, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
+    CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, NextError, OpenPalette,
+    OpenPod, OpenSelected, PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts, ShowAbout,
+    ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext, SwitchNamespace,
+    TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar, groups,
+    render_shortcuts,
 };
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
@@ -72,6 +75,11 @@ const TOGGLE_SIDEBAR_KEY: &str = if cfg!(target_os = "macos") {
 } else {
     "ctrl-b"
 };
+const COPY_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-c"
+} else {
+    "ctrl-c"
+};
 const CLOSE_WINDOW_KEY: &str = if cfg!(target_os = "macos") {
     "cmd-w"
 } else {
@@ -105,6 +113,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-n", PreviousError, Some(TABLE_KEYS)),
         KeyBinding::new("left", TimelinePrevious, Some(LOG_TIMELINE_CONTEXT)),
         KeyBinding::new("right", TimelineNext, Some(LOG_TIMELINE_CONTEXT)),
+        KeyBinding::new("down", SelectNextLine, Some(LOG_LINES_CONTEXT)),
+        KeyBinding::new("up", SelectPreviousLine, Some(LOG_LINES_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendNextLine, Some(LOG_LINES_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendPreviousLine, Some(LOG_LINES_CONTEXT)),
+        KeyBinding::new("escape", ClearLineSelection, Some(LOG_LINES_CONTEXT)),
+        KeyBinding::new(COPY_KEY, CopyLines, Some(LOG_LINES_CONTEXT)),
         KeyBinding::new("?", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("shift-/", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("escape", ClearFilter, Some(FILTER_CONTEXT)),
@@ -222,7 +236,7 @@ pub struct Root {
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
-    _log_filter_events: [Subscription; 2],
+    _log_filter_events: [Subscription; 3],
     _namespace_events: Subscription,
     _table_events: Subscription,
     _details_events: Option<Subscription>,
@@ -498,7 +512,12 @@ impl Root {
             Ok(tail) => {
                 let controls = self.log_controls.clone();
                 let filter = self.log_filter(cx);
-                self.logs = Some(cx.new(|cx| LogPane::new(tail, controls, filter, cx)));
+                let context = self.log_context(cx);
+                self.logs = Some(cx.new(|cx| {
+                    let mut logs = LogPane::new(tail, controls, filter, cx);
+                    logs.set_context(context, cx);
+                    logs
+                }));
             }
             Err(error) => self.set_log_note(Some(format!("Failed to start log tail: {error}")), cx),
         }
@@ -596,6 +615,20 @@ impl Root {
         self.apply_log_filter(cx);
     }
 
+    /// Picks the context choice at `index`.
+    #[cfg(feature = "preview")]
+    pub(crate) fn set_log_context(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.log_controls.context.update(cx, |picker, cx| {
+            picker.set_selected_index(Some(IndexPath::new(index)), window, cx);
+        });
+        self.apply_log_filter(cx);
+    }
+
     #[cfg(feature = "preview")]
     pub(crate) fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.sidebar_collapsed = collapsed;
@@ -681,10 +714,19 @@ impl Root {
         }
     }
 
+    /// How many lines of a match's source the context picker asks for.
+    fn log_context(&self, cx: &App) -> usize {
+        chosen_context(self.log_controls.context.read(cx).selected_value())
+    }
+
     fn apply_log_filter(&mut self, cx: &mut Context<Self>) {
         let filter = self.log_filter(cx);
+        let context = self.log_context(cx);
         if let Some(logs) = &self.logs {
-            logs.update(cx, |logs, cx| logs.set_filter(filter, cx));
+            logs.update(cx, |logs, cx| {
+                logs.set_filter(filter, cx);
+                logs.set_context(context, cx);
+            });
         }
     }
 
@@ -1294,7 +1336,7 @@ fn pod_status(summary: &str, snapshot: &PodSnapshot) -> String {
 }
 
 /// The log dock's filter field and severity picker, and the subscriptions that apply them.
-fn log_controls(window: &mut Window, cx: &mut Context<Root>) -> (LogControls, [Subscription; 2]) {
+fn log_controls(window: &mut Window, cx: &mut Context<Root>) -> (LogControls, [Subscription; 3]) {
     let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter lines"));
     let severity = cx.new(|cx| {
         let choices = SEVERITY_CHOICES.map(|(label, _)| label).to_vec();
@@ -1314,9 +1356,22 @@ fn log_controls(window: &mut Window, cx: &mut Context<Root>) -> (LogControls, [S
         window,
         |this, _, _: &SelectEvent<Vec<&'static str>>, _, cx| this.apply_log_filter(cx),
     );
+    let context = cx.new(|cx| {
+        let choices = CONTEXT_CHOICES.map(|(label, _)| label).to_vec();
+        LineContextPicker::new(choices, Some(IndexPath::default()), window, cx)
+    });
+    let context_events = cx.subscribe_in(
+        &context,
+        window,
+        |this, _, _: &SelectEvent<Vec<&'static str>>, _, cx| this.apply_log_filter(cx),
+    );
     (
-        LogControls { query, severity },
-        [query_events, severity_events],
+        LogControls {
+            query,
+            severity,
+            context,
+        },
+        [query_events, severity_events, context_events],
     )
 }
 
@@ -1528,6 +1583,18 @@ impl Render for Root {
                     logs.update(cx, |logs, cx| logs.jump_to_error(false, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &CopyLines, window, cx| {
+                this.close_overlays_keeping_focus(window, cx);
+                if let Some(logs) = &this.logs {
+                    logs.update(cx, |logs, cx| logs.copy_selection(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ExportLines, window, cx| {
+                this.close_overlays_keeping_focus(window, cx);
+                if let Some(logs) = &this.logs {
+                    logs.update(cx, |logs, cx| logs.export_lines(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.close_overlays(window, cx);
                 this.toggle_sidebar(window, cx);
@@ -1639,8 +1706,8 @@ mod tests {
     use gpui_kit::component::table::TableDelegate;
     use gpui_kit::test::{TestAppContextExt, TestQueryExt, TestWindowExt};
     use gpui_kit::{
-        AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds,
-        WindowOptions, px, size,
+        AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, Point, TestAppContext,
+        WindowBounds, WindowOptions, px, size,
     };
     use taffrail_core::{Backend, Contexts, Gap, LogTarget, PodRow, PodSnapshot, SavedState};
 
@@ -2347,6 +2414,173 @@ users:
             );
         })
         .unwrap();
+    }
+
+    fn selected(window: &gpui_kit::Window, seq: u64) -> bool {
+        marked(window, seq)
+    }
+
+    #[gpui_kit::test]
+    async fn clicked_lines_copy_as_stored_with_their_source(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click(("log-line", 195u64), cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Follow"));
+            window.click_with_modifiers(("log-line", 197u64), Modifiers::shift(), cx);
+            window.render_frame(cx);
+            assert!(selected(window, 195) && selected(window, 196) && selected(window, 197));
+            assert!(!selected(window, 198));
+            window.press(super::COPY_KEY, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-summary").label(), Some("Copied 3 lines"));
+        })
+        .unwrap();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(
+                "[pod/api-1/app] 2026-01-01T00:03:15Z INFO ok 195\n\
+                 [pod/api-1/app] 2026-01-01T00:03:16Z INFO ok 196\n\
+                 [pod/api-1/app] 2026-01-01T00:03:17Z INFO ok 197"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn arrow_keys_move_and_extend_the_selection(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click(("log-line", 190u64), cx);
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert!(selected(window, 191) && !selected(window, 190));
+            window.press("shift-down", cx);
+            window.press("shift-down", cx);
+            window.render_frame(cx);
+            assert!(selected(window, 191) && selected(window, 193));
+            window.press("shift-up", cx);
+            window.render_frame(cx);
+            assert!(selected(window, 192) && !selected(window, 193));
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(!selected(window, 191));
+        })
+        .unwrap();
+    }
+
+    fn description(window: &gpui_kit::Window, seq: u64) -> Option<String> {
+        window
+            .try_find(("log-line", seq))?
+            .description()
+            .map(str::to_owned)
+    }
+
+    #[gpui_kit::test]
+    async fn context_shows_lines_of_the_source_around_each_match(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.try_find("log-context-picker").is_none());
+            window.press("f", cx);
+            window.input("error", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |_, (matches, _)| matches == 2).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("log-context-picker").click("input", cx);
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.find("log-context-picker").value() == Some("Context: 3 lines")
+                && description(window, 120).is_some()
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(description(window, 120).as_deref(), Some("Match"));
+            assert_eq!(description(window, 117).as_deref(), Some("Around a match"));
+            assert_eq!(description(window, 123).as_deref(), Some("Around a match"));
+            assert!(window.try_find(("log-line", 124u64)).is_none());
+
+            window.press("shift-n", cx);
+            window.press("shift-n", cx);
+            window.render_frame(cx);
+            assert!(selected(window, 20));
+            assert_eq!(description(window, 17).as_deref(), Some("Around a match"));
+            assert!(window.try_find(("log-line", 16u64)).is_none());
+            assert!(window.try_find(("log-separator", 120u64)).is_some());
+        })
+        .unwrap();
+    }
+
+    async fn export_to(
+        handle: AnyWindowHandle,
+        path: std::path::PathBuf,
+        cx: &mut TestAppContext,
+    ) -> String {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("log-export", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(cx.did_prompt_for_new_path());
+        cx.simulate_new_path_selection(move |_| Some(path));
+        let mut summary = String::new();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            summary = window
+                .find("log-summary")
+                .label()
+                .unwrap_or_default()
+                .to_owned();
+            summary.starts_with("Exported ")
+        })
+        .await;
+        summary
+    }
+
+    #[gpui_kit::test]
+    async fn exports_every_stored_line_to_the_chosen_file(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("all.log");
+
+        let summary = export_to(handle, path.clone(), cx).await;
+
+        assert!(summary.ends_with(" lines to all.log"), "{summary}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("[pod/api-1/app] 2026-01-01T00:00:00Z INFO ok 0\n"));
+        assert!(written.contains("[pod/api-1/app] 2026-01-01T00:03:19Z INFO ok 199\n"));
+    }
+
+    #[gpui_kit::test]
+    async fn exports_only_what_the_filter_shows(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.press("f", cx);
+            window.input("error", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |_, (matches, _)| matches == 2).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("errors.log");
+
+        let summary = export_to(handle, path.clone(), cx).await;
+
+        assert_eq!(summary, "Exported 2 lines to errors.log");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[pod/api-1/app] 2026-01-01T00:00:20Z ERROR payment failed\n\
+             [pod/api-1/app] 2026-01-01T00:02:00Z ERROR disk full\n"
+        );
     }
 
     async fn wait_for_log_summary(handle: AnyWindowHandle, prefix: &str, cx: &mut TestAppContext) {

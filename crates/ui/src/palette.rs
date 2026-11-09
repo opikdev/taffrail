@@ -32,6 +32,8 @@ actions!(
         ToggleFollow,
         NextError,
         PreviousError,
+        CopyLines,
+        ExportLines,
         ToggleSidebar,
         ReloadContexts,
         CloseWindow,
@@ -65,7 +67,7 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 19] = [
+pub const SHORTCUTS: [(&str, &str); 20] = [
     (MODIFIER_K, "Open the command palette"),
     ("/", "Filter pods"),
     ("f", "Filter log lines"),
@@ -79,6 +81,7 @@ pub const SHORTCUTS: [(&str, &str); 19] = [
     ("Space", "Pause or follow logs"),
     ("n  N", "Next or previous error"),
     ("←  →", "Move along the log timeline"),
+    (MODIFIER_C, "Copy selected log lines"),
     ("Esc", "Clear the filter, then close the panel"),
     (MODIFIER_B, "Show or hide the sidebar"),
     (MODIFIER_N, "New window"),
@@ -91,6 +94,11 @@ const MODIFIER_K: &str = if cfg!(target_os = "macos") {
     "⌘K"
 } else {
     "Ctrl+K"
+};
+const MODIFIER_C: &str = if cfg!(target_os = "macos") {
+    "⌘C"
+} else {
+    "Ctrl+C"
 };
 const MODIFIER_B: &str = if cfg!(target_os = "macos") {
     "⌘B"
@@ -241,6 +249,14 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
                 ToggleFollow,
             ))
             .item(command("Next error", IconName::ArrowDown, NextError).keywords(["jump"]))
+            .item(
+                command("Copy selected lines", IconName::Copy, CopyLines)
+                    .keywords(["clipboard", "log"]),
+            )
+            .item(
+                command("Export lines…", IconName::Download, ExportLines)
+                    .keywords(["save", "file", "download", "log"]),
+            )
             .item(command("Previous error", IconName::ArrowUp, PreviousError).keywords(["jump"]));
     }
     if source.has_selection {
