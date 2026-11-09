@@ -347,8 +347,35 @@ pub fn run(directory: PathBuf) {
         pod: pod_body(created),
         events: events_body(),
         logs: log_body(),
+        live_logs: None,
     });
     assert!(WORKLOADS.len() * POD_SUFFIXES.len() > MAX_TAIL_PODS);
+
+    let live = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: String::new(),
+        live_logs: Some(&LOG_LINES),
+    });
+    let mut readme = connected(&live, ThemeMode::Dark);
+    readme.set_namespace("payments");
+    let root = readme.root.clone();
+    readme.cx.update(|cx| {
+        root.update(cx, |root, cx| {
+            root.tail_logs(cx);
+            root.select_first_row(cx);
+        })
+    });
+    readme.wait_until(|window, _| {
+        window.try_find("details-title").is_some()
+            && window
+                .find("log-summary")
+                .label()
+                .is_some_and(|summary| !summary.ends_with(" 0 lines kept"))
+    });
+    readme.save(&directory, "readme-dark.png");
+    drop(readme);
 
     tailing(&server, ThemeMode::Dark).save(&directory, "logs-dark.png");
     tailing(&server, ThemeMode::Light).save(&directory, "logs-light.png");

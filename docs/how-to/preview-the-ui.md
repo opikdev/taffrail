@@ -12,6 +12,7 @@ The app connects to a fake API server with sample pods and logs, runs through it
 
 | File | Shows |
 |---|---|
+| `readme-dark.png` | The README screenshot: one namespace, the details panel and a live tail across its pods |
 | `logs-dark.png`, `logs-light.png` | The pod table with a log tail |
 | `pods-dark.png` | The pod table alone |
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
@@ -25,6 +26,14 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `narrow-dark.png`, `narrow-columns-menu-dark.png` | The panel header at the 760 px minimum width, and its **Columns** menu open |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
+
+## Update the README screenshot
+
+```sh
+scripts/screenshot.sh
+```
+
+The script renders the previews, resizes `readme-dark.png` to 1,600 px wide with `sips` on macOS or ImageMagick elsewhere, and writes it to `docs/images/taffrail.png`. Look at the image before you commit it.
 
 ## Limits
 

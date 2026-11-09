@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 const VERSION_BODY: &str = r#"{"major":"1","minor":"35","gitVersion":"v1.35.0","gitCommit":"","gitTreeState":"","buildDate":"","goVersion":"","compiler":"","platform":""}"#;
 
@@ -11,6 +12,9 @@ pub struct Fixture {
     pub pod: String,
     pub events: String,
     pub logs: String,
+    /// When set, each log request streams these messages forever instead of `logs`, so tails
+    /// stay open and their sources interleave.
+    pub live_logs: Option<&'static [&'static str]>,
 }
 
 /// A kubeconfig whose only context, `dev`, points at `server`.
@@ -42,7 +46,32 @@ fn respond(mut stream: &TcpStream, body: &str) {
     stream.write_all(response.as_bytes()).unwrap();
 }
 
-fn serve_request(stream: TcpStream, fixture: &Fixture) {
+/// Writes one message at a time, stamped with the time since `started` after 10:42, at a pace
+/// and starting point that differ by pod. Returns when the client disconnects.
+fn stream_logs(mut stream: &TcpStream, request_line: &str, messages: &[&str], started: Instant) {
+    let seed = request_line.bytes().map(usize::from).sum::<usize>();
+    let pace = Duration::from_millis(150 + (seed % 7) as u64 * 50);
+    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n";
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    for message in messages.iter().cycle().skip(seed % messages.len()) {
+        let millis = started.elapsed().as_millis();
+        let (seconds, millis) = (42 * 60 + millis / 1000, millis % 1000);
+        let line = format!(
+            "2026-11-07T10:{:02}:{:02}.{millis:03}Z {message}\n",
+            seconds / 60 % 60,
+            seconds % 60
+        );
+        let chunk = format!("{:x}\r\n{line}\r\n", line.len());
+        if stream.write_all(chunk.as_bytes()).is_err() {
+            return;
+        }
+        thread::sleep(pace);
+    }
+}
+
+fn serve_request(stream: TcpStream, fixture: &Fixture, started: Instant) {
     // Closing with unread data resets the connection on Windows, which loses the response.
     let mut request = BufReader::new(&stream);
     let mut request_line = String::new();
@@ -56,7 +85,10 @@ fn serve_request(stream: TcpStream, fixture: &Fixture) {
     } else if request_line.contains("/api/v1/pods") {
         respond(&stream, &fixture.pod_list);
     } else if request_line.contains("/log?") {
-        respond(&stream, &fixture.logs);
+        match fixture.live_logs {
+            Some(messages) => stream_logs(&stream, &request_line, messages, started),
+            None => respond(&stream, &fixture.logs),
+        }
     } else if request_line.contains("/events") {
         respond(&stream, &fixture.events);
     } else if request_line.contains("/pods/") {
@@ -71,11 +103,12 @@ pub fn serve(fixture: Fixture) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());
     let fixture = Arc::new(fixture);
+    let started = Instant::now();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             let fixture = fixture.clone();
-            thread::spawn(move || serve_request(stream, &fixture));
+            thread::spawn(move || serve_request(stream, &fixture, started));
         }
     });
     server
