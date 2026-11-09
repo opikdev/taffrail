@@ -33,7 +33,7 @@ The signature element is the log timeline, a strip above the log lines that show
 - **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
 - The app reopens where the last changed window was left, with its sidebar state, context, namespace and columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
 - This state lives in `taffrail/state.json` under the platform config directory. Apart from the context and namespace names, it holds nothing from a cluster.
-- **About Taffrail**, in the app menu and the palette, shows the version, the license and a link to the repository. `Esc` closes it.
+- **About Taffrail**, in the app menu and the palette, shows the version, the license, a link to the repository and a **Third-party licences** link. That link opens the notices file shipped with the app, or the project license online when there is none, such as under `cargo run`. `Esc` closes it.
 
 ## Resource tables
 

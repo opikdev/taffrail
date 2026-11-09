@@ -8,7 +8,19 @@ The [Release workflow](../.github/workflows/release.yml) builds every installer.
 | Windows | `taffrail_<VERSION>_x64-setup.exe`, `taffrail_<VERSION>_x64_en-US.msi` |
 | Linux | `taffrail_<VERSION>_amd64.deb`, `taffrail_<VERSION>_x86_64.AppImage`, `taffrail_<VERSION>_x86_64.tar.gz` |
 
-Each build job also checks its own output. The Mac app must be sealed by its ad-hoc signature, in the bundle and in the `.dmg`. Both Windows installers must install. The `.deb` must install on a clean Debian with every library it links. Each app must still be running 10 seconds after it starts.
+Every package holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licenses and notices of every crate compiled into the binary for that platform:
+
+| Package | Where |
+|---|---|
+| `.dmg` | `Taffrail.app/Contents/Resources/` |
+| `-setup.exe`, `.msi` | Next to `taffrail.exe` once installed |
+| `.deb` | `/usr/share/doc/taffrail/`, with `LICENSE` named `copyright` as Debian expects |
+| AppImage | `usr/share/doc/taffrail/` inside the image |
+| `.tar.gz` | Next to `taffrail` |
+
+Each job writes both files with `scripts/third-party-licenses.sh`, which runs [cargo-about](https://github.com/EmbarkStudios/cargo-about) with `crates/ui/packaging/about.toml`. Its accepted licenses must match `[licenses] allow` in `deny.toml`. CI writes the file on every pull request, so a crate under a license it doesn't accept fails there first. To write it yourself, install the pinned version with `cargo install cargo-about@0.9.3 --locked --features cli` and run `scripts/third-party-licenses.sh`. It writes to `target/licenses`.
+
+Each build job also checks its own output. Every package must hold both license files. The Mac app must be sealed by its ad-hoc signature, in the bundle and in the `.dmg`. Both Windows installers must install. The `.deb` must install on a clean Debian with every library it links. Each app must still be running 10 seconds after it starts.
 
 ## Publish a version
 

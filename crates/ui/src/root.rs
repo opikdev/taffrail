@@ -2576,6 +2576,7 @@ users:
             let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
             assert_eq!(window.find("about-version").label(), Some(version.as_str()));
             assert!(window.try_find("about-repository").is_some());
+            assert!(window.try_find("about-notices").is_some());
             window.press("escape", cx);
             window.render_frame(cx);
             assert!(window.try_find("about").is_none());
