@@ -17,6 +17,7 @@ use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
 use super::parse::split_timestamp;
 use super::store::{Gap, LogLine, LogStore, Record};
+use super::timeline::TimelineView;
 use crate::follow::{Follow, Member};
 use crate::pods::{PodFeed, PodKey, PodSnapshot};
 
@@ -127,6 +128,27 @@ impl LogReader {
 
     pub fn read(&self, range: Range<u64>) -> io::Result<Vec<LogLine>> {
         self.store.lock().expect("log store lock").read(range)
+    }
+
+    /// Every stored line, counted over time in at most `max_buckets` buckets.
+    pub fn timeline(&self, max_buckets: usize) -> TimelineView {
+        self.store
+            .lock()
+            .expect("log store lock")
+            .timeline(max_buckets)
+    }
+
+    /// The first stored error line at or after `seq`.
+    pub fn next_error(&self, seq: u64) -> Option<u64> {
+        self.store.lock().expect("log store lock").next_error(seq)
+    }
+
+    /// The last stored error line before `seq`.
+    pub fn previous_error(&self, seq: u64) -> Option<u64> {
+        self.store
+            .lock()
+            .expect("log store lock")
+            .previous_error(seq)
     }
 }
 

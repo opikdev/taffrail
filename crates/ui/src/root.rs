@@ -28,13 +28,14 @@ use crate::logs::{
     SeverityPicker, chosen_severity, dock_height,
 };
 use crate::palette::{
-    CloseWindow, FocusFilter, FocusLogFilter, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY,
-    PaletteSource, ReloadContexts, ShowAbout, ShowEvents, ShowShortcuts, ShowSummary, ShowYaml,
-    SwitchContext, SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow,
-    ToggleSidebar, groups, render_shortcuts,
+    CloseWindow, FocusFilter, FocusLogFilter, NextError, OpenPalette, OpenPod, OpenSelected,
+    PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts, ShowAbout, ShowEvents,
+    ShowShortcuts, ShowSummary, ShowYaml, SwitchContext, SwitchNamespace, TailSelection,
+    TailSelector, TailWorkload, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
 use crate::sidebar::resource_sidebar;
+use crate::timeline::{LOG_TIMELINE_CONTEXT, TimelineNext, TimelinePrevious};
 use crate::windows;
 
 type ContextPicker = SelectState<Vec<String>>;
@@ -100,6 +101,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("e", ShowEvents, Some(TABLE_KEYS)),
         KeyBinding::new("y", ShowYaml, Some(TABLE_KEYS)),
         KeyBinding::new("space", ToggleFollow, Some(TABLE_KEYS)),
+        KeyBinding::new("n", NextError, Some(TABLE_KEYS)),
+        KeyBinding::new("shift-n", PreviousError, Some(TABLE_KEYS)),
+        KeyBinding::new("left", TimelinePrevious, Some(LOG_TIMELINE_CONTEXT)),
+        KeyBinding::new("right", TimelineNext, Some(LOG_TIMELINE_CONTEXT)),
         KeyBinding::new("?", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("shift-/", ShowShortcuts, Some(TABLE_KEYS)),
         KeyBinding::new("escape", ClearFilter, Some(FILTER_CONTEXT)),
@@ -723,6 +728,14 @@ impl Root {
         self.sheet = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
+    }
+
+    /// Closes an open palette or sheet, and otherwise leaves focus where it is, such as on
+    /// the log timeline.
+    fn close_overlays_keeping_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.sheet.is_some() {
+            self.close_overlays(window, cx);
+        }
     }
 
     fn show_tab(&mut self, tab: PaneTab, cx: &mut Context<Self>) {
@@ -1503,6 +1516,18 @@ impl Render for Root {
                     logs.update(cx, |logs, cx| logs.toggle_following(cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &NextError, window, cx| {
+                this.close_overlays_keeping_focus(window, cx);
+                if let Some(logs) = &this.logs {
+                    logs.update(cx, |logs, cx| logs.jump_to_error(true, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousError, window, cx| {
+                this.close_overlays_keeping_focus(window, cx);
+                if let Some(logs) = &this.logs {
+                    logs.update(cx, |logs, cx| logs.jump_to_error(false, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.close_overlays(window, cx);
                 this.toggle_sidebar(window, cx);
@@ -1977,8 +2002,15 @@ users:
             window.click("tail-logs", cx);
         })
         .unwrap();
+        // The timeline catches up with the lines at its next count.
+        let timeline_marks_gap = |window: &gpui_kit::Window| {
+            (0..40usize)
+                .filter_map(|index| window.try_find(("log-timeline-bar", index)))
+                .filter_map(|bar| bar.label().map(str::to_owned))
+                .any(|label| label.ends_with("no lines, lines may be missing"))
+        };
         cx.wait_for(handle, Duration::from_secs(10), |window, _| {
-            !window.find_all_by_label(&label).is_empty()
+            !window.find_all_by_label(&label).is_empty() && timeline_marks_gap(window)
         })
         .await;
 
@@ -2173,6 +2205,146 @@ users:
             window.press("space", cx);
             window.render_frame(cx);
             assert_eq!(window.find("log-mode").label(), Some("Pause"));
+        })
+        .unwrap();
+    }
+
+    /// 200 lines a second apart, with errors at lines 20 and 120.
+    fn timeline_log_body() -> String {
+        (0..200)
+            .map(|line| {
+                let text = match line {
+                    20 => "ERROR payment failed".to_owned(),
+                    120 => "ERROR disk full".to_owned(),
+                    line => format!("INFO ok {line}"),
+                };
+                format!("2026-01-01T00:{:02}:{:02}Z {text}\n", line / 60, line % 60)
+            })
+            .collect()
+    }
+
+    async fn tail_timeline_lines(cx: &mut TestAppContext) -> AnyWindowHandle {
+        cx.executor().allow_parking();
+        let server = serve_pods_with_logs(POD_LIST_BODY, &timeline_log_body());
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find(("log-line", 199u64)).is_some()
+        })
+        .await;
+        handle
+    }
+
+    fn marked(window: &gpui_kit::Window, seq: u64) -> bool {
+        window
+            .try_find(("log-line", seq))
+            .is_some_and(|line| line.selected() == Some(true))
+    }
+
+    fn bar(window: &gpui_kit::Window, index: usize) -> gpui_kit::test::ElementSnapshot {
+        window.find(("log-timeline-bar", index))
+    }
+
+    #[gpui_kit::test]
+    async fn the_timeline_stacks_lines_by_severity(cx: &mut TestAppContext) {
+        let handle = tail_severity_lines(cx).await;
+
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find(("log-timeline-bar", 2usize)).is_some()
+        })
+        .await;
+        cx.update_window(handle, |_, window, _| {
+            let label = |index| bar(window, index).label().unwrap_or_default().to_owned();
+            assert!(label(0).ends_with(": 1 ERROR"), "{}", label(0));
+            assert!(label(1).ends_with(": 1 WARN"), "{}", label(1));
+            assert!(label(2).ends_with(": 1 OTHER"), "{}", label(2));
+            assert!(
+                window
+                    .find("log-timeline")
+                    .label()
+                    .is_some_and(|label| label.ends_with(", 1 s per bar"))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn clicking_a_bar_shows_its_lines_and_pauses(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.try_find(("log-line", 0u64)).is_none());
+            window.click(("log-timeline-bar", 0usize), cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("log-mode").label(), Some("Follow"));
+            assert!(window.try_find(("log-line", 0u64)).is_some());
+            assert_eq!(bar(window, 0).selected(), Some(true));
+            assert_eq!(window.find("log-timeline").focused(), Some(true));
+
+            window.press("right", cx);
+            window.render_frame(cx);
+            assert_eq!(bar(window, 1).selected(), Some(true));
+            assert_eq!(bar(window, 0).selected(), Some(false));
+            window.press("left", cx);
+            window.render_frame(cx);
+            assert_eq!(bar(window, 0).selected(), Some(true));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn n_and_shift_n_move_between_errors(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("shift-n", cx);
+            window.render_frame(cx);
+            assert!(marked(window, 120));
+            assert_eq!(window.find("log-mode").label(), Some("Follow"));
+
+            window.press("shift-n", cx);
+            window.render_frame(cx);
+            assert!(marked(window, 20));
+            assert!(window.try_find(("log-line", 120u64)).is_none());
+
+            window.press("n", cx);
+            window.render_frame(cx);
+            assert!(marked(window, 120));
+
+            window.press("n", cx);
+            window.render_frame(cx);
+            assert!(marked(window, 120));
+            assert_eq!(window.find("log-summary").label(), Some("No later errors"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_next_error_respects_the_filter(cx: &mut TestAppContext) {
+        let handle = tail_timeline_lines(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press("f", cx);
+            window.input("payment", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_filter(handle, cx, |_, (matches, _)| matches == 1).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.press("shift-n", cx);
+            window.render_frame(cx);
+            assert!(marked(window, 20));
+            window.press("shift-n", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("log-summary").label(),
+                Some("No earlier errors match the filter")
+            );
         })
         .unwrap();
     }

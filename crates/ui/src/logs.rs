@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone};
@@ -6,15 +8,20 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, Theme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    FilterError, FilterProgress, Following, Gap, LogFilter, LogFilterScan, LogLine, LogProgress,
-    LogReader, LogTail, Severity, json_line,
+    FilterError, FilterProgress, Following, Gap, Level, LogFilter, LogFilterScan, LogLine,
+    LogProgress, LogReader, LogTail, Severity, TimelineView, json_line,
 };
 
 use crate::pods::format_count;
+use crate::timeline::{
+    BARS_HEIGHT, LOG_TIMELINE_CONTEXT, TIMELINE_HEIGHT, TimelineNext, TimelinePrevious, axis_time,
+    bucket_label, duration_label, level_color, max_buckets, next_bucket, segment_heights,
+};
 
 const LINE_HEIGHT: f32 = 20.;
 pub const BAR_HEIGHT: f32 = 40.;
@@ -29,6 +36,14 @@ const FILTER_WIDTH: f32 = 220.;
 const FILTER_MIN_WIDTH: f32 = 96.;
 const SEVERITY_PICKER_WIDTH: f32 = 136.;
 const NOTICE_WIDTH: f32 = 420.;
+/// Room left of the log dock for the sidebar and the panel's inset, used to size the
+/// timeline before its first paint.
+const DOCK_INSET: f32 = 240.;
+/// Below this window width the timeline's legend leaves out the bar length.
+const COMPACT_LEGEND_BELOW: f32 = 920.;
+const SWATCH_SIZE: f32 = 8.;
+/// The accent edge of the line that `n` or `Shift+N` found.
+const MARK_WIDTH: f32 = 2.;
 /// The key context around the log filter field, where `Esc` clears it.
 pub const LOG_FILTER_CONTEXT: &str = "LogFilter";
 
@@ -86,6 +101,24 @@ pub struct LogPane {
     note: Option<SharedString>,
     controls: LogControls,
     filter: Option<ActiveFilter>,
+    /// Lines in view at the last render, and how many rows fit.
+    visible: Range<u64>,
+    rows: u64,
+    /// The time of the line the view is at, for the timeline to mark.
+    view_time: Option<i64>,
+    /// The line that `n` or `Shift+N` last found.
+    marked: Option<u64>,
+    /// Says why `n` or `Shift+N` found nothing, until the view moves.
+    hint: Option<SharedString>,
+    timeline: TimelineView,
+    /// Set when lines or matches change, so the bars are counted again.
+    timeline_stale: bool,
+    timeline_buckets: usize,
+    /// The strip's width at its last paint.
+    timeline_width: Rc<Cell<Pixels>>,
+    timeline_focus: FocusHandle,
+    /// The bar that the timeline's arrow keys move from, by the time it starts.
+    cursor: Option<i64>,
     _updates: Task<()>,
 }
 
@@ -101,6 +134,7 @@ impl LogPane {
             while let Some(progress) = tail.next().await {
                 let updated = this.update(cx, |this, cx| {
                     this.progress = progress;
+                    this.timeline_stale = true;
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -118,6 +152,17 @@ impl LogPane {
             note: None,
             controls,
             filter: None,
+            visible: 0..0,
+            rows: 0,
+            view_time: None,
+            marked: None,
+            hint: None,
+            timeline: TimelineView::default(),
+            timeline_stale: true,
+            timeline_buckets: 0,
+            timeline_width: Rc::new(Cell::new(px(0.))),
+            timeline_focus: cx.focus_handle().tab_stop(true),
+            cursor: None,
             _updates: updates,
         };
         pane.set_filter(filter, cx);
@@ -131,6 +176,8 @@ impl LogPane {
         if current == Some(&filter) || (current.is_none() && filter.is_empty()) {
             return;
         }
+        self.timeline_stale = true;
+        self.hint = None;
         if filter.is_empty() {
             self.filter = None;
             cx.notify();
@@ -149,6 +196,7 @@ impl LogPane {
                         if let Some(active) = &mut this.filter {
                             active.progress = progress;
                         }
+                        this.timeline_stale = true;
                         cx.notify();
                     });
                     if updated.is_err() {
@@ -194,7 +242,120 @@ impl LogPane {
 
     fn set_following(&mut self, following: bool, cx: &mut Context<Self>) {
         self.following = following;
+        self.hint = None;
+        if following {
+            self.marked = None;
+            self.cursor = None;
+        }
         cx.notify();
+    }
+
+    /// The matching scan, or `None` without a filter. A filter that can't run has no lines.
+    fn scan(&self) -> Option<Result<&LogFilterScan, &FilterError>> {
+        self.filter.as_ref().map(|active| active.scan.as_ref())
+    }
+
+    /// Holds the view still with `seq` at the top, or `above` lines below the top.
+    fn show_line(&mut self, seq: u64, above: u64) {
+        self.following = false;
+        self.top = match self.scan() {
+            Some(Ok(scan)) => {
+                let position = scan.position_of(seq).saturating_sub(above as usize);
+                scan.seqs(position..position + 1)
+                    .first()
+                    .copied()
+                    .unwrap_or(seq)
+            }
+            Some(Err(_)) => seq,
+            None => seq.saturating_sub(above).max(self.progress.first),
+        };
+    }
+
+    /// Moves to the next error, or the previous one, that the filter shows. With no error
+    /// found yet, it looks from the lines in view, including them.
+    pub fn jump_to_error(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let from = match (self.marked, forward) {
+            (Some(marked), true) => marked + 1,
+            (Some(marked), false) => marked,
+            (None, true) => self.visible.start,
+            (None, false) => self.visible.end,
+        };
+        let found = match self.scan() {
+            Some(Ok(scan)) if forward => scan.next_error(from),
+            Some(Ok(scan)) => scan.previous_error(from),
+            Some(Err(_)) => None,
+            None if forward => self.reader.next_error(from),
+            None => self.reader.previous_error(from),
+        };
+        match found {
+            Some(seq) => {
+                self.marked = Some(seq);
+                self.cursor = None;
+                self.hint = None;
+                self.show_line(seq, self.rows / 3);
+            }
+            None => {
+                let hint = match (forward, self.filter.is_some()) {
+                    (true, false) => "No later errors",
+                    (false, false) => "No earlier errors",
+                    (true, true) => "No later errors match the filter",
+                    (false, true) => "No earlier errors match the filter",
+                };
+                self.hint = Some(hint.into());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Shows the first line of the bar at `index`, and pauses following.
+    fn jump_to_bucket(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(bucket) = self.timeline.buckets.get(index) else {
+            return;
+        };
+        let Some(first) = bucket.first else {
+            return;
+        };
+        self.cursor = Some(self.timeline.bucket_start(index));
+        self.marked = None;
+        self.hint = None;
+        self.show_line(first, 0);
+        cx.notify();
+    }
+
+    /// The bar the view is at: the one the arrow keys moved to, or the one that holds the
+    /// line in view. Following has none.
+    fn current_bucket(&self) -> Option<usize> {
+        if self.following {
+            return None;
+        }
+        self.timeline.bucket_at(self.cursor.or(self.view_time)?)
+    }
+
+    fn move_on_timeline(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some(index) = next_bucket(&self.timeline, self.current_bucket(), forward) {
+            self.jump_to_bucket(index, cx);
+        }
+    }
+
+    /// Counts the bars again when lines, matches or the strip's width have changed.
+    fn update_timeline(&mut self, window: &Window) {
+        let measured = self.timeline_width.get();
+        let width = if measured > px(0.) {
+            measured
+        } else {
+            window.viewport_size().width - px(DOCK_INSET)
+        };
+        let buckets = max_buckets(width);
+        if !self.timeline_stale && buckets == self.timeline_buckets {
+            return;
+        }
+        self.timeline = match self.scan() {
+            Some(Ok(scan)) => scan.timeline(buckets),
+            Some(Err(_)) => TimelineView::default(),
+            None => self.reader.timeline(buckets),
+        };
+        self.timeline_stale = false;
+        self.timeline_buckets = buckets;
     }
 
     fn scroll(&mut self, event: &ScrollEvent, rows: u64, cx: &mut Context<Self>) {
@@ -204,6 +365,10 @@ impl LogPane {
         self.scrolled_lines -= lines;
         if lines < 0. {
             self.following = false;
+        }
+        if lines != 0. {
+            self.cursor = None;
+            self.hint = None;
         }
         match self.filter.as_ref().map(|active| &active.scan) {
             Some(Ok(scan)) => {
@@ -367,15 +532,25 @@ impl LogPane {
         } else {
             format!("{text} {fields}")
         };
+        let marked = self.marked == Some(line.seq);
         h_flex()
             .id(("log-line", line.seq))
             .test_support()
             .aria_label(label)
+            .aria_selected(marked)
             .h(px(LINE_HEIGHT))
             .gap_3()
             .flex_shrink_0()
             .whitespace_nowrap()
             .overflow_hidden()
+            .when(marked, |row| {
+                row.mx(px(-GAP_INSET))
+                    .pl(px(GAP_INSET - MARK_WIDTH))
+                    .pr(px(GAP_INSET))
+                    .border_l(px(MARK_WIDTH))
+                    .border_color(theme.ring)
+                    .bg(theme.table_active)
+            })
             .child(
                 div()
                     .w(px(TIME_WIDTH))
@@ -414,6 +589,200 @@ impl LogPane {
             )
             .into_any_element()
     }
+}
+
+impl LogPane {
+    /// The strip of bars above the lines, with its times and legend.
+    fn render_timeline(
+        &self,
+        compact: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let view = &self.timeline;
+        let tallest = view
+            .buckets
+            .iter()
+            .map(|bucket| bucket.counts.total())
+            .max()
+            .unwrap_or(0);
+        let focused = self.timeline_focus.is_focused(window);
+        let current = self.current_bucket();
+        let area = BARS_HEIGHT - 4.;
+        let gap_pattern = pattern_slash(theme.muted_foreground.opacity(0.4), 1., 3.);
+        let bars: Vec<AnyElement> = view
+            .buckets
+            .iter()
+            .enumerate()
+            .map(|(index, bucket)| {
+                let label: SharedString = bucket_label(view, index, &Local).into();
+                let heights = segment_heights(&bucket.counts, tallest, area);
+                let is_current = current == Some(index);
+                div()
+                    .id(("log-timeline-bar", index))
+                    .test_support()
+                    .aria_label(label.clone())
+                    .aria_selected(is_current)
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .border_t_2()
+                    .border_color(if is_current && focused {
+                        theme.ring
+                    } else {
+                        transparent_black()
+                    })
+                    .when(bucket.gap, |bar| bar.bg(gap_pattern))
+                    .when(is_current && !bucket.gap, |bar| bar.bg(theme.table_active))
+                    .children(Level::ALL.iter().rev().filter_map(|level| {
+                        let height = heights[*level as usize];
+                        (height > 0.).then(|| {
+                            div()
+                                .h(px(height))
+                                .flex_shrink_0()
+                                .bg(level_color(*level, theme))
+                        })
+                    }))
+                    .when(bucket.first.is_some(), |bar| {
+                        bar.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.timeline_focus.focus(window, cx);
+                                this.jump_to_bucket(index, cx);
+                            }))
+                    })
+                    .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                    .into_any_element()
+            })
+            .collect();
+        let width = self.timeline_width.clone();
+        let measure = canvas(
+            move |bounds, window, cx| {
+                if (bounds.size.width - width.get()).abs() >= px(1.) {
+                    width.set(bounds.size.width);
+                    let handle = window.window_handle();
+                    cx.defer(move |cx| {
+                        handle.update(cx, |_, window, _| window.refresh()).ok();
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let muted = theme.muted_foreground;
+        let totals = view.totals();
+        let legend = Level::ALL
+            .iter()
+            .map(|level| {
+                let color = level_color(*level, theme);
+                let word = if *level == Level::Other { muted } else { color };
+                legend_item(
+                    div().size(px(SWATCH_SIZE)).rounded_sm().bg(color),
+                    level.label(),
+                    word,
+                    Some(format_count(totals.get(*level) as usize)),
+                )
+            })
+            .chain(view.has_gaps().then(|| {
+                legend_item(
+                    div()
+                        .size(px(SWATCH_SIZE))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(muted)
+                        .bg(gap_pattern),
+                    "MISSING",
+                    muted,
+                    None,
+                )
+            }))
+            .collect::<Vec<_>>();
+        let (start, end, summary) = match view.buckets.len() {
+            0 => (
+                String::new(),
+                String::new(),
+                "Timeline, no lines".to_owned(),
+            ),
+            count => {
+                let start = axis_time(view.start, view, &Local);
+                let end = axis_time(view.bucket_start(count), view, &Local);
+                let per_bar = duration_label(view.width);
+                let summary = format!("Timeline from {start} to {end}, {per_bar} per bar");
+                (start, end, summary)
+            }
+        };
+        let per_bar =
+            (!compact && view.width > 0).then(|| format!("{} per bar", duration_label(view.width)));
+        v_flex()
+            .id("log-timeline")
+            .test_support()
+            .track_focus(&self.timeline_focus)
+            .key_context(LOG_TIMELINE_CONTEXT)
+            .aria_label(summary)
+            .on_action(cx.listener(|this, _: &TimelinePrevious, _, cx| {
+                this.move_on_timeline(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TimelineNext, _, cx| {
+                this.move_on_timeline(true, cx);
+            }))
+            .h(px(TIMELINE_HEIGHT))
+            .flex_shrink_0()
+            .mx_3()
+            .pt_1()
+            .gap_1()
+            .child(
+                h_flex()
+                    .id("log-timeline-bars")
+                    .relative()
+                    .h(px(BARS_HEIGHT))
+                    .flex_shrink_0()
+                    .items_end()
+                    .gap(px(1.))
+                    .border_b_1()
+                    .border_color(if focused && view.buckets.is_empty() {
+                        theme.ring
+                    } else {
+                        theme.border
+                    })
+                    .child(measure)
+                    .children(bars),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(muted)
+                    .whitespace_nowrap()
+                    .child(div().flex_shrink_0().child(start))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_center()
+                            .gap_3()
+                            .overflow_hidden()
+                            .children(legend)
+                            .children(per_bar),
+                    )
+                    .child(div().flex_shrink_0().child(end)),
+            )
+    }
+}
+
+/// A legend entry: a swatch, the word, and how many lines it counts.
+fn legend_item(swatch: Div, word: &'static str, color: Hsla, count: Option<String>) -> AnyElement {
+    h_flex()
+        .flex_shrink_0()
+        .gap_1()
+        .items_center()
+        .child(swatch)
+        .child(div().text_color(color).child(word))
+        .children(count)
+        .into_any_element()
 }
 
 /// What a gap row says, with times of day in `zone`.
@@ -521,10 +890,26 @@ fn scrolled_top(top: u64, lines: i64, held: Range<u64>, rows: u64) -> u64 {
 
 impl Render for LogPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines_height = dock_height(window.viewport_size().height) - px(BAR_HEIGHT);
+        let lines_height =
+            dock_height(window.viewport_size().height) - px(BAR_HEIGHT + TIMELINE_HEIGHT);
         let rows = (lines_height / px(LINE_HEIGHT)) as u64;
+        self.rows = rows;
         let held = self.held();
         let lines = self.visible_lines(rows);
+        if let Ok(lines) = &lines {
+            self.visible = match (lines.first(), lines.last()) {
+                (Some(first), Some(last)) => first.seq..last.seq + 1,
+                _ => self.top..self.top,
+            };
+            let marked = lines
+                .iter()
+                .find(|line| Some(line.seq) == self.marked)
+                .and_then(|line| line.timestamp);
+            self.view_time = marked.or_else(|| lines.iter().find_map(|line| line.timestamp));
+        }
+        self.update_timeline(window);
+        let compact = window.viewport_size().width < px(COMPACT_LEGEND_BELOW);
+        let timeline = self.render_timeline(compact, window, cx);
         let error = lines
             .as_ref()
             .err()
@@ -533,7 +918,8 @@ impl Render for LogPane {
             .or_else(|| {
                 let active = self.filter.as_ref()?;
                 active.progress.error.clone()
-            });
+            })
+            .or_else(|| self.hint.as_ref().map(ToString::to_string));
         let summary = self
             .note
             .as_ref()
@@ -599,6 +985,7 @@ impl Render for LogPane {
                             })),
                     ),
             )
+            .child(timeline)
             .map(|dock| match notice {
                 Some(notice) => dock.child(notice).into_any_element(),
                 None => dock
@@ -608,6 +995,7 @@ impl Render for LogPane {
                             .flex_1()
                             .min_h_0()
                             .px_3()
+                            .pt_1()
                             .flex()
                             .flex_col()
                             .when(following, |lines| lines.justify_end())

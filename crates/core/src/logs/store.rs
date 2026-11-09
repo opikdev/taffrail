@@ -7,6 +7,7 @@ use k8s_openapi::jiff::Timestamp;
 use tokio::sync::watch;
 
 use super::parse::{Severity, line_severity, parse_rfc3339, split_timestamp};
+use super::timeline::{Mark, Timeline, TimelineView};
 
 pub(super) const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_SEGMENTS: usize = 16;
@@ -35,7 +36,7 @@ impl Gap {
         .into_bytes()
     }
 
-    fn parse(text: &[u8]) -> Option<Self> {
+    pub(super) fn parse(text: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(text).ok()?;
         let range = text.strip_prefix(GAP_PREFIX)?.strip_suffix(']')?;
         let (from, to) = range.split_once(GAP_SEPARATOR)?;
@@ -209,6 +210,8 @@ pub(super) fn each_record(
 pub(super) struct Encoded {
     pub first: u64,
     pub covered: Range<u64>,
+    /// The first line of the segment read, which keys its timeline counts.
+    pub segment: u64,
 }
 
 fn encode(record: &Record, encoded: &mut Vec<u8>) {
@@ -260,6 +263,8 @@ pub(super) struct LogStore {
     max_segments: usize,
     /// The sequence numbers held, sent after every append.
     held: watch::Sender<Range<u64>>,
+    /// Line counts over time, kept as lines are appended and dropped.
+    timeline: Timeline,
 }
 
 impl LogStore {
@@ -273,6 +278,7 @@ impl LogStore {
             segment_bytes,
             max_segments,
             held: watch::Sender::new(0..0),
+            timeline: Timeline::default(),
         })
     }
 
@@ -289,8 +295,12 @@ impl LogStore {
                 let offset = segment.bytes + encoded.len() as u64;
                 segment.index.push(offset);
             }
+            let (part, seq) = (segment.first_seq, segment.end_seq());
             segment.lines += 1;
             encode(record, &mut encoded);
+            if let Some(mark) = Mark::of(record.gap, record.severity, &record.text) {
+                self.timeline.add(part, seq, mark);
+            }
         }
         let written = self.current().write(&encoded);
         self.held.send_replace(self.range());
@@ -313,6 +323,7 @@ impl LogStore {
         self.segments.push_back(Segment::new(first_seq)?);
         if self.segments.len() > self.max_segments {
             self.segments.pop_front();
+            self.timeline.remove_below(self.range().start);
         }
         Ok(())
     }
@@ -355,7 +366,26 @@ impl LogStore {
         let segment = &self.segments[self.segment_of(range.start)];
         let covered = range.start..range.end.min(segment.end_seq());
         let first = segment.encoded(covered.clone(), encoded)?;
-        Ok(Some(Encoded { first, covered }))
+        Ok(Some(Encoded {
+            first,
+            covered,
+            segment: segment.first_seq,
+        }))
+    }
+
+    /// The lines held, counted over time in at most `max_buckets` buckets.
+    pub(super) fn timeline(&self, max_buckets: usize) -> TimelineView {
+        self.timeline.view(max_buckets)
+    }
+
+    /// The first error line at or after `seq`.
+    pub(super) fn next_error(&self, seq: u64) -> Option<u64> {
+        self.timeline.next_error(seq)
+    }
+
+    /// The last error line before `seq`.
+    pub(super) fn previous_error(&self, seq: u64) -> Option<u64> {
+        self.timeline.previous_error(seq)
     }
 
     /// Reads the lines with these sequence numbers, which must be in ascending order.
@@ -574,6 +604,68 @@ mod tests {
             store.read(held.clone()).unwrap().len() as u64,
             held.end - held.start
         );
+    }
+
+    fn stamped(second: u32, level: &str) -> Record {
+        Record::new(
+            0,
+            format!("2026-11-07T10:42:{second:02}Z {level} line").into_bytes(),
+        )
+    }
+
+    #[test]
+    fn counts_stored_lines_over_time() {
+        let mut store = LogStore::new().unwrap();
+        let gap = Gap {
+            from: 1_794_048_123_000_000_000,
+            to: 1_794_048_124_000_000_000,
+        };
+        store
+            .append(&[
+                stamped(0, "ERROR"),
+                stamped(1, "INFO"),
+                Record::note(0, b"[taffrail: tail ended]".to_vec()),
+                Record::gap(0, gap),
+                stamped(5, "WARN"),
+                stamped(5, "ERROR"),
+            ])
+            .unwrap();
+
+        let view = store.timeline(100);
+
+        assert_eq!(view.start, 1_794_048_120_000_000_000);
+        assert_eq!(view.buckets.len(), 6);
+        assert_eq!(view.totals().0, [2, 1, 1, 0], "the note has no time");
+        assert_eq!(view.buckets[3].first, Some(3));
+        assert!(view.buckets[3].gap && view.buckets[4].gap);
+        assert_eq!(store.next_error(1), Some(5));
+        assert_eq!(store.previous_error(5), Some(0));
+    }
+
+    #[test]
+    fn dropped_lines_leave_the_timeline() {
+        let mut store = LogStore::with_limits(200, 3).unwrap();
+        let records: Vec<Record> = (0..300)
+            .map(|index| {
+                stamped(
+                    index % 60,
+                    if index.is_multiple_of(2) {
+                        "ERROR"
+                    } else {
+                        "INFO"
+                    },
+                )
+            })
+            .collect();
+        store.append(&records).unwrap();
+
+        let held = store.range();
+        let view = store.timeline(100);
+
+        assert!(held.start > 0);
+        assert_eq!(view.totals().total(), held.end - held.start);
+        assert!(store.next_error(0).is_some_and(|seq| seq >= held.start));
+        assert_eq!(store.previous_error(held.start), None);
     }
 
     #[test]

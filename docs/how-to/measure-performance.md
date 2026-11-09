@@ -35,6 +35,16 @@ cargo test --release -p taffrail-core _speed -- --ignored --nocapture --test-thr
 
 `parse_speed` prints the time per line. `store_speed` prints the time to find severities, store, read, and find them again on read, and the share of disk the stored severity takes.
 
+## Measure the log timeline
+
+Count as many lines as a full store holds over time, then time building the bars:
+
+```sh
+cargo test --release -p taffrail-core timeline_speed -- --ignored --nocapture
+```
+
+It prints the time to count each line as it is stored, the memory the counts take, and the time to build the bars the dock shows.
+
 ## Measure log reconnects
 
 Tail 50 simulated pods through a local proxy that cuts every connection at an interval, without opening a window:
@@ -53,7 +63,7 @@ Fill a store with 1 GiB of mixed plain and JSON lines from 50 sources, then time
 cargo test --release -p taffrail-core filter_speed -- --ignored --nocapture
 ```
 
-Each filter runs twice. It prints the time to the first match, to the first 50 matches, which fill the dock, and to the end of the scan, with the memory the matches take. The store has just been written, so the OS has its files cached, as it would in the app.
+Each filter runs twice. It prints the time to the first match, to the first 50 matches, which fill the dock, and to the end of the scan, with the memory the matches and their timeline take. The store has just been written, so the OS has its files cached, as it would in the app.
 
 ## Sample a running process
 

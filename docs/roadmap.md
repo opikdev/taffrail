@@ -82,4 +82,4 @@ Run [the benchmark](how-to/measure-performance.md) on macOS. Measure Windows if 
 | Log throughput | 50 pods, 10,000 lines per second | No dropped lines | 0 gaps in 604,780 lines |
 | Memory | Both loads together | Under 300 MB | 220 MB peak |
 | Idle wake-ups | App open, no activity | Under 1 per second | 0.4 |
-| Filter stored lines | 1 GiB of logs | First results within 100 ms, a full scan within 5 s | First match in 2 ms, full scan in 0.7 s, at milestone 3 |
+| Filter stored lines | 1 GiB of logs | First results within 100 ms, a full scan within 5 s | First match in 2 ms, full scan in 0.8 s, at milestone 3 |

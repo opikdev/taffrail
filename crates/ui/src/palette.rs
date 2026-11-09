@@ -30,6 +30,8 @@ actions!(
         ShowEvents,
         ShowYaml,
         ToggleFollow,
+        NextError,
+        PreviousError,
         ToggleSidebar,
         ReloadContexts,
         CloseWindow,
@@ -63,7 +65,7 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 17] = [
+pub const SHORTCUTS: [(&str, &str); 19] = [
     (MODIFIER_K, "Open the command palette"),
     ("/", "Filter pods"),
     ("f", "Filter log lines"),
@@ -75,6 +77,8 @@ pub const SHORTCUTS: [(&str, &str); 17] = [
     ("e", "Show events"),
     ("s", "Show summary"),
     ("Space", "Pause or follow logs"),
+    ("n  N", "Next or previous error"),
+    ("←  →", "Move along the log timeline"),
     ("Esc", "Clear the filter, then close the panel"),
     (MODIFIER_B, "Show or hide the sidebar"),
     (MODIFIER_N, "New window"),
@@ -235,7 +239,9 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
                 "Pause or follow logs",
                 IconName::Pause,
                 ToggleFollow,
-            ));
+            ))
+            .item(command("Next error", IconName::ArrowDown, NextError).keywords(["jump"]))
+            .item(command("Previous error", IconName::ArrowUp, PreviousError).keywords(["jump"]));
     }
     if source.has_selection {
         actions = actions
