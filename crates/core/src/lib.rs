@@ -13,3 +13,5 @@ pub use pods::{PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use state::{SavedState, WindowRect, state_path};
 
 pub const APP_NAME: &str = "Taffrail";
+/// The bundle identifier, also used as the Windows app ID and the Linux window class.
+pub const APP_ID: &str = "dev.opik.taffrail";

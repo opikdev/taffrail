@@ -20,6 +20,12 @@ preview = ["gpui-kit/test-support"]
 gpui-kit.workspace = true
 taffrail-core.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+image.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

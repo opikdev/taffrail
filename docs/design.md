@@ -33,6 +33,7 @@ The signature element is the log timeline, a strip above the log lines that show
 - **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
 - The app reopens where the last changed window was left, with its sidebar state, context, namespace and columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
 - This state lives in `taffrail/state.json` under the platform config directory. Apart from the context and namespace names, it holds nothing from a cluster.
+- **About Taffrail**, in the app menu and the palette, shows the version, the license and a link to the repository. `Esc` closes it.
 
 ## Resource tables
 
@@ -151,6 +152,12 @@ Light and dark themes follow the system. Both live in `crates/ui/themes/taffrail
 | `info` | `#7DB7E8` | `#1F5F99` | Neutral notices |
 
 A test checks that every text colour measures at least 4.5:1 on every surface, in both themes.
+
+## App icon
+
+The icon shows the register dial of a taffrail log, with its line trailed off to a brass rotator. It sits on a dark tile on the macOS icon grid: an 824 px rounded square inside a 1024 px canvas.
+
+The source is `crates/ui/assets/icon/icon.svg`. After changing it, run `scripts/render-icons.sh` on macOS to render the PNG, `.icns` and `.ico` files beside it, and commit them. The script needs `resvg`, from `cargo install resvg --locked`. The app's bundle identifier is `dev.opik.taffrail`.
 
 ## Accessibility
 

@@ -11,6 +11,7 @@ use gpui_kit::*;
 use taffrail_core::{Backend, ClusterError, Contexts, MAX_TAIL_PODS, SavedState};
 
 use crate::fake_api::{Fixture, kubeconfig, serve};
+use crate::palette::ShowAbout;
 use crate::root::Root;
 
 const WINDOW: (f32, f32) = (1360., 860.);
@@ -416,6 +417,22 @@ pub fn run(directory: PathBuf) {
         })
         .expect("preview window closed");
     shortcuts.save(&directory, "shortcuts-light.png");
+
+    for (mode, name) in [
+        (ThemeMode::Dark, "about-dark.png"),
+        (ThemeMode::Light, "about-light.png"),
+    ] {
+        let mut about = connected(&server, mode);
+        let handle = about.handle;
+        about
+            .cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.dispatch_action(Box::new(ShowAbout), cx);
+            })
+            .expect("preview window closed");
+        about.save(&directory, name);
+    }
 
     let mut picker = connected(&server, ThemeMode::Dark);
     let handle = picker.handle;

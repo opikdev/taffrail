@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::*;
-use taffrail_core::{APP_NAME, Backend, ClusterError, Contexts, SavedState, WindowRect};
+use taffrail_core::{APP_ID, APP_NAME, Backend, ClusterError, Contexts, SavedState, WindowRect};
 
-use crate::palette::CloseWindow;
+use crate::palette::{CloseWindow, ShowAbout};
 use crate::root::{self, Root};
 
 actions!(taffrail, [NewWindow, Quit]);
@@ -55,7 +55,11 @@ pub fn init(
         cx.defer(move |cx| open_beside_active(backend, contexts, cx));
     });
     cx.set_menus([
-        Menu::new(APP_NAME).items([MenuItem::action(format!("Quit {APP_NAME}"), Quit)]),
+        Menu::new(APP_NAME).items([
+            MenuItem::action(format!("About {APP_NAME}"), ShowAbout),
+            MenuItem::separator(),
+            MenuItem::action(format!("Quit {APP_NAME}"), Quit),
+        ]),
         Menu::new("File").items([
             MenuItem::action("New window", NewWindow),
             MenuItem::action("Close window", CloseWindow),
@@ -100,6 +104,9 @@ pub fn open(
         }),
         app_owns_titlebar_drag: true,
         window_min_size: Some(size(px(MINIMUM_SIZE.0), px(MINIMUM_SIZE.1))),
+        app_id: Some(APP_ID.into()),
+        #[cfg(target_os = "linux")]
+        icon: window_icon(),
         ..WindowOptions::default()
     };
     #[cfg(feature = "bench")]
@@ -107,6 +114,16 @@ pub fn open(
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| Root::new(backend, contexts, saved, window, cx))
     })
+}
+
+/// X11 shows this beside the title. Wayland and the other platforms take the icon from the
+/// installed app instead.
+#[cfg(target_os = "linux")]
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    let png = include_bytes!("../assets/icon/128x128.png");
+    image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()
+        .map(|icon| Arc::new(icon.into_rgba8()))
 }
 
 fn open_beside_active(
