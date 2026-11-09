@@ -80,18 +80,31 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Key | Action |
 |---|---|
 | `⌘K` / `Ctrl+K` | Open the command palette |
+| `⌘B` / `Ctrl+B` | Show or hide the sidebar |
 | `⌘N` / `Ctrl+N` | Open a new window |
+| `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
 | `/` | Filter the current view |
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
 | `l` | Tail logs for the selection |
+| `s` | Show the summary |
 | `y` | Show YAML |
 | `e` | Show events |
 | `Space` | Pause or follow logs |
-| `n` / `Shift+N` | Next or previous error |
+| `n` / `Shift+N` | Next or previous error, from milestone 3 |
 | `Esc` | Clear the filter, then close the panel |
 | `?` | Show all shortcuts |
+
+## Command palette
+
+- `⌘K`, or the search field in the title bar, opens the palette over the panel.
+- Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
+- Choosing a pod selects it and opens its details. If the filter or namespace hid it, both clear first.
+- Below the pods, the palette lists the commands that apply now, then contexts and namespaces, with a check on the current ones.
+- Every command dispatches the same action as its key or button.
+- `Esc` clears the search, then closes the palette.
+- `?` opens the list of shortcuts, which `Esc` closes.
 
 ## States
 

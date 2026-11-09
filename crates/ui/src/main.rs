@@ -4,6 +4,7 @@ mod details;
 #[cfg(any(test, feature = "preview"))]
 mod fake_api;
 mod logs;
+mod palette;
 mod pods;
 #[cfg(feature = "preview")]
 mod preview;

@@ -24,7 +24,7 @@ const YAML_LINE_HEIGHT: f32 = 20.;
 const TABS: [PaneTab; 3] = [PaneTab::Summary, PaneTab::Events, PaneTab::Yaml];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PaneTab {
+pub enum PaneTab {
     Summary,
     Events,
     Yaml,
@@ -69,6 +69,11 @@ impl DetailsPane {
         };
         pane.refresh(cx);
         pane
+    }
+
+    pub fn show_tab(&mut self, tab: PaneTab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        cx.notify();
     }
 
     /// Takes the latest row for this pod, and reads the pod again if it changed.

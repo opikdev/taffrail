@@ -1,0 +1,348 @@
+use std::sync::Arc;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::component::command::{CommandGroup, CommandItem};
+use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use taffrail_core::{PodKey, PodRow};
+
+use crate::pods::urgency;
+use crate::windows::NewWindow;
+
+/// How many pods a search lists, so that large clusters stay quick to search.
+const MAX_POD_RESULTS: usize = 20;
+
+const KEY_WIDTH: f32 = 88.;
+
+actions!(
+    taffrail,
+    [
+        OpenPalette,
+        ShowShortcuts,
+        FocusFilter,
+        OpenSelected,
+        TailSelection,
+        ShowSummary,
+        ShowEvents,
+        ShowYaml,
+        ToggleFollow,
+        ToggleSidebar,
+        ReloadContexts,
+        CloseWindow,
+    ]
+);
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct SwitchContext {
+    pub name: SharedString,
+}
+
+/// `None` shows every namespace.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct SwitchNamespace {
+    pub namespace: Option<SharedString>,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct OpenPod {
+    pub key: PodKey,
+}
+
+/// Every key the app answers to, for the shortcut sheet.
+pub const SHORTCUTS: [(&str, &str); 15] = [
+    (MODIFIER_K, "Open the command palette"),
+    ("/", "Filter pods"),
+    ("j  k", "Move through rows"),
+    ("Enter", "Open details"),
+    ("l", "Tail logs for the selection"),
+    ("y", "Show YAML"),
+    ("e", "Show events"),
+    ("s", "Show summary"),
+    ("Space", "Pause or follow logs"),
+    ("Esc", "Clear the filter, then close the panel"),
+    (MODIFIER_B, "Show or hide the sidebar"),
+    (MODIFIER_N, "New window"),
+    (MODIFIER_W, "Close window"),
+    (MODIFIER_Q, "Quit"),
+    ("?", "Show all shortcuts"),
+];
+
+const MODIFIER_K: &str = if cfg!(target_os = "macos") {
+    "⌘K"
+} else {
+    "Ctrl+K"
+};
+const MODIFIER_B: &str = if cfg!(target_os = "macos") {
+    "⌘B"
+} else {
+    "Ctrl+B"
+};
+const MODIFIER_N: &str = if cfg!(target_os = "macos") {
+    "⌘N"
+} else {
+    "Ctrl+N"
+};
+const MODIFIER_W: &str = if cfg!(target_os = "macos") {
+    "⌘W"
+} else {
+    "Ctrl+W"
+};
+const MODIFIER_Q: &str = if cfg!(target_os = "macos") {
+    "⌘Q"
+} else {
+    "Ctrl+Q"
+};
+
+/// The label for the palette's key, shown in the title bar.
+pub const PALETTE_KEY: &str = MODIFIER_K;
+
+/// What the palette can offer at this moment.
+pub struct PaletteSource<'a> {
+    pub query: &'a str,
+    pub rows: &'a [Arc<PodRow>],
+    pub contexts: Vec<String>,
+    pub current_context: Option<String>,
+    pub namespaces: Vec<&'a str>,
+    pub namespace: Option<&'a str>,
+    pub has_selection: bool,
+    pub has_tail: bool,
+    pub connected: bool,
+}
+
+/// Up to `MAX_POD_RESULTS` pods matching `query`, with those that need attention first.
+/// Nothing is listed until a search starts.
+pub fn matching_pods<'a>(rows: &'a [Arc<PodRow>], query: &str) -> Vec<&'a PodRow> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut pods: Vec<_> = rows
+        .iter()
+        .filter(|row| row.matches(query))
+        .map(Arc::as_ref)
+        .collect();
+    pods.sort_by_cached_key(|row| urgency(row));
+    pods.truncate(MAX_POD_RESULTS);
+    pods
+}
+
+fn command(label: &'static str, icon: IconName, action: impl Action) -> CommandItem {
+    CommandItem::new()
+        .label(label)
+        .icon(Icon::new(icon))
+        .action(action.boxed_clone())
+}
+
+/// A pod row names its namespace too, since two namespaces can hold pods with the same name.
+fn pod_item(row: &PodRow) -> CommandItem {
+    let name: SharedString = row.name.clone().into();
+    let namespace: SharedString = row.namespace.clone().into();
+    CommandItem::new()
+        .label(name.clone())
+        .keywords([row.namespace.clone(), row.status.clone()])
+        .action(Box::new(OpenPod { key: row.key() }))
+        .child(move |_, cx| {
+            let muted = cx.theme().muted_foreground;
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(Icon::new(IconName::Box).size_4().text_color(muted))
+                .child(div().min_w_0().truncate().child(name.clone()))
+                .child(
+                    div()
+                        .ml_auto()
+                        .flex_shrink_0()
+                        .text_color(muted)
+                        .child(namespace.clone()),
+                )
+        })
+}
+
+/// The palette's entries. Each one dispatches an action, so a command behaves the same from
+/// the palette, a key or a button.
+pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
+    let mut actions = CommandGroup::new().label("Commands").item(command(
+        "Filter pods",
+        IconName::Search,
+        FocusFilter,
+    ));
+    if source.connected {
+        actions = actions.item(command("Tail logs", IconName::ScrollText, TailSelection));
+    }
+    if source.has_tail {
+        actions = actions.item(command(
+            "Pause or follow logs",
+            IconName::Pause,
+            ToggleFollow,
+        ));
+    }
+    if source.has_selection {
+        actions = actions
+            .item(command("Show summary", IconName::Info, ShowSummary))
+            .item(command("Show events", IconName::Activity, ShowEvents))
+            .item(command("Show YAML", IconName::FileText, ShowYaml));
+    }
+    actions = actions
+        .item(command(
+            "Show or hide the sidebar",
+            IconName::PanelLeft,
+            ToggleSidebar,
+        ))
+        .item(command("New window", IconName::Plus, NewWindow))
+        .item(command(
+            "Reload contexts",
+            IconName::RefreshCw,
+            ReloadContexts,
+        ))
+        .item(command(
+            "Show all shortcuts",
+            IconName::Keyboard,
+            ShowShortcuts,
+        ));
+
+    let pods = matching_pods(source.rows, source.query);
+    let mut groups = Vec::new();
+    if !pods.is_empty() {
+        groups.push(
+            CommandGroup::new()
+                .label("Pods")
+                .items(pods.into_iter().map(pod_item)),
+        );
+    }
+    groups.push(actions);
+    groups.push(
+        CommandGroup::new()
+            .label("Contexts")
+            .items(source.contexts.into_iter().map(|name| {
+                let current = source.current_context.as_ref() == Some(&name);
+                CommandItem::new()
+                    .label(name.clone())
+                    .icon(Icon::new(IconName::Server))
+                    .keywords(["context", "cluster"])
+                    .checked(current)
+                    .action(Box::new(SwitchContext { name: name.into() }))
+            })),
+    );
+    let chosen = source.namespace;
+    let all = CommandItem::new()
+        .label("All namespaces")
+        .icon(Icon::new(IconName::Folder))
+        .checked(chosen.is_none())
+        .action(Box::new(SwitchNamespace { namespace: None }));
+    groups.push(CommandGroup::new().label("Namespaces").item(all).items(
+        source.namespaces.into_iter().map(|namespace| {
+            CommandItem::new()
+                .label(namespace.to_owned())
+                .icon(Icon::new(IconName::Folder))
+                .keywords(["namespace"])
+                .checked(chosen == Some(namespace))
+                .action(Box::new(SwitchNamespace {
+                    namespace: Some(namespace.to_owned().into()),
+                }))
+        }),
+    ));
+    groups
+}
+
+/// The sheet of keys that `?` opens.
+pub fn render_shortcuts(cx: &App) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    v_flex()
+        .id("shortcuts")
+        .test_support()
+        .role(Role::Dialog)
+        .aria_label("Keyboard shortcuts")
+        .gap_1p5()
+        .p_4()
+        .text_sm()
+        .child(
+            div()
+                .pb_1()
+                .font_weight(FontWeight::MEDIUM)
+                .child("Keyboard shortcuts"),
+        )
+        .children(SHORTCUTS.map(|(key, action)| {
+            h_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(KEY_WIDTH))
+                        .flex_shrink_0()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
+                        .text_color(theme.muted_foreground)
+                        .child(key),
+                )
+                .child(action)
+        }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use taffrail_core::PodRow;
+
+    use super::{MAX_POD_RESULTS, matching_pods};
+
+    fn row(namespace: &str, name: &str) -> Arc<PodRow> {
+        with_status(namespace, name, "Running")
+    }
+
+    fn with_status(namespace: &str, name: &str, status: &str) -> Arc<PodRow> {
+        Arc::new(PodRow {
+            namespace: namespace.into(),
+            name: name.into(),
+            status: status.into(),
+            ready: "1/1".into(),
+            restarts: 0,
+            node: "node-1".into(),
+            created_unix: None,
+            containers: vec!["app".into()],
+        })
+    }
+
+    #[test]
+    fn nothing_is_listed_before_a_search_starts() {
+        assert!(matching_pods(&[row("shop", "api")], "").is_empty());
+    }
+
+    #[test]
+    fn search_covers_namespace_and_name() {
+        let rows = [row("shop", "api"), row("web", "front")];
+        let found = matching_pods(&rows, "web/fr");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "front");
+    }
+
+    #[test]
+    fn pods_that_need_attention_lead_the_results() {
+        let rows = [
+            row("shop", "api-a"),
+            with_status("shop", "api-b", "CrashLoopBackOff"),
+        ];
+        assert_eq!(matching_pods(&rows, "api")[0].name, "api-b");
+    }
+
+    #[test]
+    fn a_failing_pod_is_not_cut_off_by_the_limit() {
+        let mut rows: Vec<_> = (0..MAX_POD_RESULTS + 5)
+            .map(|ix| row("shop", &format!("pod-{ix}")))
+            .collect();
+        rows.push(with_status("shop", "pod-last", "Error"));
+        assert_eq!(matching_pods(&rows, "pod")[0].name, "pod-last");
+    }
+
+    #[test]
+    fn results_stop_at_the_limit() {
+        let rows: Vec<_> = (0..MAX_POD_RESULTS + 5)
+            .map(|ix| row("shop", &format!("pod-{ix}")))
+            .collect();
+        assert_eq!(matching_pods(&rows, "pod").len(), MAX_POD_RESULTS);
+    }
+}
