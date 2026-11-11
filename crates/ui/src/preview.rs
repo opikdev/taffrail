@@ -251,6 +251,73 @@ fn deployment_objects(created: &str) -> Vec<(String, String)> {
     objects
 }
 
+/// Nodes as `(name, role, ready, unschedulable, pressure)`, with one not ready, one
+/// cordoned and one short of disk.
+const NODES: [(&str, &str, &str, bool, &str); 12] = [
+    ("node-01", "control-plane", "True", false, ""),
+    ("node-02", "worker", "True", false, ""),
+    ("node-03", "worker", "True", false, ""),
+    ("node-04", "worker", "True", false, ""),
+    ("node-05", "worker", "True", false, ""),
+    ("node-06", "worker", "True", false, "DiskPressure"),
+    ("node-07", "worker", "False", false, ""),
+    ("node-08", "worker", "True", false, ""),
+    ("node-09", "worker", "True", true, ""),
+    ("node-10", "worker", "True", false, ""),
+    ("node-11", "worker", "True", false, ""),
+    ("node-12", "worker", "True", false, ""),
+];
+
+fn node_body(index: usize, created: &str) -> String {
+    let (name, role, ready, unschedulable, pressure) = NODES[index];
+    let reason = if ready == "True" {
+        "KubeletReady"
+    } else {
+        "NodeStatusUnknown"
+    };
+    let message = if ready == "True" {
+        "kubelet is posting ready status"
+    } else {
+        "Kubelet stopped posting node status."
+    };
+    let condition = |kind: &str| {
+        let status = if kind == pressure { "True" } else { "False" };
+        format!(r#"{{"type":"{kind}","status":"{status}","reason":"Kubelet{kind}","message":""}}"#)
+    };
+    let taints = match (role, unschedulable) {
+        ("control-plane", _) => {
+            r#"[{"key":"node-role.kubernetes.io/control-plane","effect":"NoSchedule"}]"#
+        }
+        (_, true) => r#"[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"}]"#,
+        _ => "[]",
+    };
+    let octet = index + 4;
+    format!(
+        r#"{{"apiVersion":"v1","kind":"Node","metadata":{{"name":"{name}","uid":"n-{name}","resourceVersion":"1","creationTimestamp":"{created}","labels":{{"kubernetes.io/hostname":"{name}","kubernetes.io/arch":"arm64","node-role.kubernetes.io/{role}":""}},"managedFields":[{{"manager":"kubelet"}}]}},"spec":{{"unschedulable":{unschedulable},"taints":{taints}}},"status":{{"addresses":[{{"type":"InternalIP","address":"10.0.7.{octet}"}},{{"type":"Hostname","address":"{name}"}}],"capacity":{{"cpu":"8","memory":"32876Mi","pods":"110","ephemeral-storage":"101430960Ki"}},"allocatable":{{"cpu":"7910m","memory":"31212Mi","pods":"110","ephemeral-storage":"93478772582"}},"conditions":[{},{},{},{{"type":"Ready","status":"{ready}","reason":"{reason}","message":"{message}"}}],"nodeInfo":{{"architecture":"arm64","bootID":"","containerRuntimeVersion":"containerd://2.0.1","kernelVersion":"6.8.0-1021-aws","kubeProxyVersion":"","kubeletVersion":"v1.35.0","machineID":"","operatingSystem":"linux","osImage":"Ubuntu 24.04.1 LTS","systemUUID":""}}}}}}"#,
+        condition("MemoryPressure"),
+        condition("DiskPressure"),
+        condition("PIDPressure"),
+    )
+}
+
+/// The node list, and each node by path, for the Nodes view and its details.
+fn node_objects(created: &str) -> Vec<(String, String)> {
+    let items: Vec<_> = (0..NODES.len())
+        .map(|index| node_body(index, created))
+        .collect();
+    let list = format!(
+        r#"{{"kind":"NodeList","apiVersion":"v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+        items.join(",")
+    );
+    let mut objects = vec![("/api/v1/nodes".to_owned(), list)];
+    objects.extend(
+        NODES.iter().enumerate().map(|(index, (name, ..))| {
+            (format!("/api/v1/nodes/{name}"), node_body(index, created))
+        }),
+    );
+    objects
+}
+
 /// The ReplicaSets of the `checkout-api` rollout and their Deployment, for following it.
 fn workload_objects() -> Vec<(String, String)> {
     let replica_set = |hash: &str| {
@@ -1424,6 +1491,49 @@ pub fn run(directory: PathBuf) {
         "nightly-backup-29381400",
         ("jobs", "job-details"),
     );
+
+    let nodes = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects: node_objects(created),
+    });
+    let refused_nodes = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: vec!["/api/v1/nodes"],
+        reconnect_logs: None,
+        objects: Vec::new(),
+    });
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut table = connected(&nodes, mode);
+        table.show_view(View::Nodes);
+        table.wait_until(|window, _| !window.find_all_by_label("node-12").is_empty());
+        table.save(&directory, &format!("nodes-{suffix}.png"));
+        let root = table.root.clone();
+        table
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        table.wait_until(|window, _| window.try_find("details-title").is_some());
+        table.settle();
+        table.save(&directory, &format!("node-details-{suffix}.png"));
+
+        let mut forbidden = connected(&refused_nodes, mode);
+        forbidden.show_view(View::Nodes);
+        forbidden.wait_until(|window, _| {
+            window
+                .try_find("notice-title")
+                .is_some_and(|title| title.label().is_some_and(|label| label.contains("Nodes")))
+        });
+        forbidden.save(&directory, &format!("no-permission-nodes-{suffix}.png"));
+    }
 
     let mut empty = connected(&server, ThemeMode::Light);
     empty.set_namespace("billing");

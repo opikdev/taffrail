@@ -87,10 +87,7 @@ pub struct TailSelector {
 /// Every key the app answers to, for the shortcut sheet.
 pub const SHORTCUTS: [(&str, &str); 23] = [
     (MODIFIER_K, "Open the command palette"),
-    (
-        "1 – 5",
-        "Go to Pods, Deployments, StatefulSets, DaemonSets or Jobs",
-    ),
+    ("1 – 6", "Go to a view, in sidebar order"),
     ("/", "Filter the current view"),
     ("f", "Filter log lines"),
     ("j  k", "Move through rows"),
@@ -163,6 +160,10 @@ pub struct PaletteSource<'a> {
     pub namespaces: Vec<&'a str>,
     pub namespace: Option<&'a str>,
     pub has_selection: bool,
+    /// Whether the selected object has pods to tail, as a workload has.
+    pub has_follow: bool,
+    /// Whether the selected object has pods to show, as a workload or a node has.
+    pub has_pods: bool,
     pub has_tail: bool,
     pub connected: bool,
     /// Where **Back** returns to, such as `pod api-1`, after following a link.
@@ -241,16 +242,18 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
     if source.connected && source.view == View::Pods {
         actions = actions.item(command("Tail logs", IconName::ScrollText, TailSelection));
     }
-    if source.connected && source.has_selection && source.view != View::Pods {
-        actions = actions
-            .item(
-                command("Tail its pods", IconName::ScrollText, TailWorkload)
-                    .keywords(["follow", "logs", "workload", "rollout"]),
-            )
-            .item(
-                command("Show its pods", IconName::Box, ShowPods)
-                    .keywords(["selector", "workload"]),
-            );
+    let on_other_view = source.connected && source.has_selection && source.view != View::Pods;
+    if on_other_view && source.has_follow {
+        actions = actions.item(
+            command("Tail its pods", IconName::ScrollText, TailWorkload)
+                .keywords(["follow", "logs", "workload", "rollout"]),
+        );
+    }
+    if on_other_view && source.has_pods {
+        actions = actions.item(
+            command("Show its pods", IconName::Box, ShowPods)
+                .keywords(["selector", "workload", "node"]),
+        );
     }
     if source.connected && source.has_selection && source.view == View::Pods {
         actions = actions.item(

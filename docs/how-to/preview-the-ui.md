@@ -50,6 +50,9 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 | `jobs-dark.png`, `jobs-light.png` | The Jobs table, with failed Jobs and their reasons, then one retrying, first |
 | `job-details-dark.png`, `job-details-light.png` | A failed Job's details, with its backoff limit |
 | `no-permission-dark.png`, `no-permission-light.png` | The Deployments view when the API refuses to list Deployments, with the lock in the sidebar |
+| `nodes-dark.png`, `nodes-light.png` | The Nodes table, with a node not ready, one under disk pressure and one cordoned first |
+| `node-details-dark.png`, `node-details-light.png` | A node that is not ready, with its details |
+| `no-permission-nodes-dark.png`, `no-permission-nodes-light.png` | The Nodes view when the API refuses to list nodes |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
 

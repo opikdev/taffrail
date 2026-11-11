@@ -26,7 +26,7 @@ pub trait ObjectDetails: Clone + Debug + PartialEq + Send + Sized + 'static {
         + Send
         + 'static;
 
-    /// Reads objects in `namespace`.
+    /// Reads objects in `namespace`, which is empty for a cluster-scoped kind.
     fn api(client: Client, namespace: &str) -> Api<Self::Object>;
 
     /// Builds the details from an object and its events, which a role may not be allowed
@@ -228,8 +228,12 @@ pub(crate) async fn load<D: ObjectDetails>(
     name: String,
 ) -> Result<D, ClusterError> {
     let kind = D::Object::kind(&());
+    let path = match namespace.as_str() {
+        "" => name.clone(),
+        namespace => format!("{namespace}/{name}"),
+    };
     let failed = |error: String| ClusterError::ReadObject {
-        object: format!("{} {namespace}/{name}", kind.to_lowercase()),
+        object: format!("{} {path}", kind.to_lowercase()),
         error,
     };
     let object = D::api(client.clone(), &namespace)
@@ -238,7 +242,13 @@ pub(crate) async fn load<D: ObjectDetails>(
         .map_err(|error| failed(reason(&error)))?;
     let selector = format!("involvedObject.kind={kind},involvedObject.name={name}");
     let client_for_resolve = client.clone();
-    let events = Api::<Event>::namespaced(client, &namespace)
+    // Events about a cluster-scoped object, such as a node, live in another namespace,
+    // usually `default`.
+    let events: Api<Event> = match namespace.as_str() {
+        "" => Api::all(client),
+        namespace => Api::namespaced(client, namespace),
+    };
+    let events = events
         .list(&ListParams::default().fields(&selector))
         .await
         .map(|events| newest_events(events.items))

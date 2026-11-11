@@ -36,7 +36,7 @@ use crate::palette::{
     ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::sidebar::{SidebarItem, resource_sidebar};
-use crate::table::{ALL_NAMESPACES, ResourceTable, SelectorFilter, TableRow};
+use crate::table::{ALL_NAMESPACES, PodCounts, ResourceTable, SelectorFilter, TableRow};
 use crate::timeline::{LOG_TIMELINE_CONTEXT, TimelineNext, TimelinePrevious};
 use crate::views::{Panel, ResourcePanel, View, new_panel};
 use crate::windows;
@@ -497,8 +497,18 @@ impl Root {
             input.set_placeholder(filter_placeholder(view), window, cx);
         });
         self.start_view(view, window, cx);
+        self.update_pod_counts(cx);
         self.update_namespace_options(window, cx);
         cx.notify();
+    }
+
+    /// Counts pods for the current view, if it has a column that shows them.
+    fn update_pod_counts(&self, cx: &mut App) {
+        let panel = self.panel();
+        if panel.counts_pods() {
+            let counts = PodCounts::new(&self.pod_table(cx).snapshot().rows);
+            panel.set_pod_counts(Arc::new(counts), cx);
+        }
     }
 
     fn start_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
@@ -523,6 +533,9 @@ impl Root {
         }
         if view == View::Pods || view == self.view {
             self.update_namespace_options(window, cx);
+        }
+        if view == View::Pods && self.view != View::Pods {
+            self.update_pod_counts(cx);
         }
         self.panel_for(view).update_details(cx);
         if self
@@ -875,23 +888,18 @@ impl Root {
         self.open_details(cx);
     }
 
-    /// Shows the pods of the selected workload, by its selector and in its namespace.
+    /// Shows the pods of the selected object: a workload's by its selector and in its
+    /// namespace, or a node's in every namespace.
     fn show_workload_pods(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(follow) = self.panel().selected_follow(cx) else {
+        let Some((pods, namespace)) = self.panel().selected_pods(cx) else {
             return;
         };
         self.push_history(cx);
         self.filter
             .update(cx, |filter, cx| filter.set_value("", window, cx));
         self.show_view(View::Pods, window, cx);
-        self.pods.set_selector(
-            Some(SelectorFilter {
-                label: follow.label,
-                selector: follow.selector,
-            }),
-            cx,
-        );
-        self.set_namespace(follow.namespace, window, cx);
+        self.pods.set_selector(Some(pods), cx);
+        self.set_namespace(namespace, window, cx);
         self.remember_state(window, cx);
         cx.notify();
     }
@@ -1169,7 +1177,7 @@ impl Root {
     /// up to 10 times a second, and most leave the namespaces alone.
     fn update_namespace_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut options: Vec<String> = owned(self.pod_table(cx).namespace_options());
-        if self.view != View::Pods {
+        if self.view != View::Pods && self.panel().namespaced() {
             for namespace in self.panel().namespaces(cx) {
                 if let Err(ix) = options[1..].binary_search(&namespace) {
                     options.insert(ix + 1, namespace);
@@ -1328,6 +1336,9 @@ impl Root {
                     .action(NoticeAction::RetryConnection, "Try again"),
             ),
             Session::Connected { .. } => match status.error {
+                Some(WatchError::Forbidden { message, .. }) if !self.panel().namespaced() => {
+                    Some(cluster_forbidden_notice(name, message))
+                }
                 Some(WatchError::Forbidden { namespace, message }) => {
                     Some(self.forbidden_notice(name, namespace, message))
                 }
@@ -1531,6 +1542,8 @@ impl Root {
             namespaces: table.namespaces(),
             namespace: table.namespace(),
             has_selection: self.panel().details().is_some(),
+            has_follow: self.panel().selected_follow(cx).is_some(),
+            has_pods: self.panel().selected_pods(cx).is_some(),
             has_tail: self.logs.is_some(),
             connected: self.connection.is_some(),
             back: self.history.last().map(|place| place.label.clone()),
@@ -1607,6 +1620,8 @@ impl Root {
             .history
             .last()
             .map(|place| format!("Back to {}", place.label));
+        let namespaced = self.panel().namespaced();
+        let tails = view == View::Pods || view.group() == "Workloads";
         let muted = cx.theme().muted_foreground;
         h_flex()
             .h(px(PANEL_HEADER_HEIGHT))
@@ -1638,16 +1653,36 @@ impl Root {
             .when_some(selector, |header, selector| {
                 header.child(render_selector_chip(selector.label, cx))
             })
-            .child(
-                div().w(px(NAMESPACE_PICKER_WIDTH)).flex_shrink_0().child(
-                    Select::new(&self.namespace_picker)
-                        .id("namespace-picker")
-                        .small()
-                        .menu_width(px(NAMESPACE_MENU_WIDTH))
-                        .accessibility_label("Namespace")
-                        .search_placeholder("Search namespaces"),
-                ),
-            )
+            .when(namespaced, |header| {
+                header.child(
+                    div().w(px(NAMESPACE_PICKER_WIDTH)).flex_shrink_0().child(
+                        Select::new(&self.namespace_picker)
+                            .id("namespace-picker")
+                            .small()
+                            .menu_width(px(NAMESPACE_MENU_WIDTH))
+                            .accessibility_label("Namespace")
+                            .search_placeholder("Search namespaces"),
+                    ),
+                )
+            })
+            .when(!namespaced, |header| {
+                header.child(
+                    h_flex()
+                        .id("cluster-wide")
+                        .test_support()
+                        .aria_label(format!(
+                            "{} are cluster-wide, so the namespace does not apply",
+                            view.name()
+                        ))
+                        .w(px(NAMESPACE_PICKER_WIDTH))
+                        .flex_shrink_0()
+                        .gap_1p5()
+                        .items_center()
+                        .text_color(muted)
+                        .child(Icon::new(IconName::Globe).small())
+                        .child("Cluster-wide"),
+                )
+            })
             .child(
                 div()
                     .key_context(FILTER_CONTEXT)
@@ -1680,23 +1715,25 @@ impl Root {
                         }),
                 ),
             )
-            .child(
-                div().flex_shrink_0().child(
-                    Button::new("tail-logs")
-                        .small()
-                        .outline()
-                        .icon(Icon::new(IconName::ScrollText))
-                        .label(label)
-                        .disabled(!can_tail || self.connection.is_none())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if view == View::Pods {
-                                this.tail_logs(cx);
-                            } else {
-                                this.tail_workload(cx);
-                            }
-                        })),
-                ),
-            )
+            .when(tails, |header| {
+                header.child(
+                    div().flex_shrink_0().child(
+                        Button::new("tail-logs")
+                            .small()
+                            .outline()
+                            .icon(Icon::new(IconName::ScrollText))
+                            .label(label)
+                            .disabled(!can_tail || self.connection.is_none())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if view == View::Pods {
+                                    this.tail_logs(cx);
+                                } else {
+                                    this.tail_workload(cx);
+                                }
+                            })),
+                    ),
+                )
+            })
     }
 
     fn render_notice(&self, notice: Notice, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1742,6 +1779,19 @@ impl Root {
                 )
             })
     }
+}
+
+/// The **No permission** state for a kind that lives outside namespaces, where choosing a
+/// namespace cannot help.
+fn cluster_forbidden_notice(name: &str, message: String) -> Notice {
+    let detail = if message.is_empty() {
+        "The API refused the list.".to_owned()
+    } else {
+        message
+    };
+    Notice::new(format!("You can't list {name} in this cluster")).detail(format!(
+        "{detail}. {name} are not in namespaces, so listing them needs a cluster-wide role."
+    ))
 }
 
 fn columns_menu(menu: PopupMenu, columns: &[&'static str], hidden: &[&'static str]) -> PopupMenu {
@@ -4344,6 +4394,144 @@ users:
         press(handle, "w", cx);
 
         wait_for_log_summary(handle, "Following deployment/api", cx).await;
+    }
+
+    const NODES: &str = "/api/v1/nodes";
+    const NODE_LIST_BODY: &str = r#"{"kind":"NodeList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"node-1","resourceVersion":"1","labels":{"node-role.kubernetes.io/worker":""}},"status":{"conditions":[{"type":"Ready","status":"True"}],"nodeInfo":{"architecture":"arm64","bootID":"","containerRuntimeVersion":"containerd://2.0.1","kernelVersion":"6.8.0","kubeProxyVersion":"","kubeletVersion":"v1.35.0","machineID":"","operatingSystem":"linux","osImage":"Ubuntu","systemUUID":""}}},{"metadata":{"name":"node-2","resourceVersion":"1"},"spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}"#;
+    const NODE_BODY: &str = r#"{"kind":"Node","apiVersion":"v1","metadata":{"name":"node-2","resourceVersion":"1"},"spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"False"}]}}"#;
+    const PODS_ON_NODES_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-1","resourceVersion":"1"},"spec":{"nodeName":"node-2","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-2","resourceVersion":"1"},"spec":{"nodeName":"node-2","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
+
+    /// Pods on two nodes, and the nodes. `forbidden` lists paths the API refuses.
+    async fn open_nodes(
+        forbidden: Vec<&'static str>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let server = serve(Fixture {
+            pod_list: PODS_ON_NODES_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![
+                (NODES.into(), NODE_LIST_BODY.into()),
+                ("/api/v1/nodes/node-2".into(), NODE_BODY.into()),
+            ],
+        });
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_label(handle, "front-2", cx).await;
+        press(handle, "6", cx);
+        (handle, root)
+    }
+
+    #[gpui_kit::test]
+    async fn the_nodes_view_lists_nodes_cluster_wide_with_their_pods(cx: &mut TestAppContext) {
+        let (handle, root) = open_nodes(Vec::new(), cx).await;
+        set_namespace(handle, &root, "shop", cx);
+
+        wait_for_label(handle, "node-2", cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find_all_by_label("Filter nodes").len(), 1);
+            assert!(window.try_find("namespace-picker").is_none());
+            assert_eq!(
+                window.find("cluster-wide").label(),
+                Some("Nodes are cluster-wide, so the namespace does not apply")
+            );
+            assert!(window.try_find("tail-logs").is_none());
+            assert_eq!(window.find_all_by_label("v1.35.0").len(), 1);
+        })
+        .unwrap();
+        let rows = root.read_with(cx, |root, cx| {
+            let panel = root.panel();
+            (0..2)
+                .map(|row| panel.row_cells(row, cx))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            [
+                ["node-2", "NotReady, SchedulingDisabled", "", "", "2", ""],
+                ["node-1", "Ready", "worker", "v1.35.0", "1", ""],
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn show_its_pods_narrows_the_pods_to_the_node(cx: &mut TestAppContext) {
+        let (handle, root) = open_nodes(Vec::new(), cx).await;
+        set_namespace(handle, &root, "shop", cx);
+        wait_for_label(handle, "node-2", cx).await;
+
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details").label(), Some("Node details"));
+            assert_eq!(window.find("details-title").label(), Some("node-2"));
+        })
+        .unwrap();
+        press(handle, "p", cx);
+
+        wait_for_label(handle, "front-2", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("api-1").is_empty());
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+            assert_eq!(
+                window.find("selector-filter").label(),
+                Some("Showing pods of node/node-2")
+            );
+            assert_eq!(
+                window.find("namespace-picker").value(),
+                Some("All namespaces")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_pods_node_link_opens_the_node(cx: &mut TestAppContext) {
+        let (handle, root) = open_nodes(Vec::new(), cx).await;
+        press(handle, "1", cx);
+        wait_for_label(handle, "api-1", cx).await;
+        set_namespace(handle, &root, "shop", cx);
+        press(handle, "j", cx);
+        wait_for_label(handle, "Go to node/node-1", cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click("link node/node-1", cx);
+        })
+        .unwrap();
+
+        wait_for_label(handle, "Filter nodes", cx).await;
+        wait_for_details(handle, "node-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("go-back").label(), Some("Back to pod api-1"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_node_list_says_so_for_the_whole_cluster(cx: &mut TestAppContext) {
+        let (handle, root) = open_nodes(vec![NODES], cx).await;
+
+        wait_for_notice(handle, "You can't list Nodes in this cluster", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("notice-action").is_none());
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| {
+            let locked: Vec<_> = root
+                .sidebar_items(cx)
+                .into_iter()
+                .filter(|item| item.forbidden)
+                .map(|item| item.view)
+                .collect();
+            assert_eq!(locked, [View::Nodes]);
+        });
+
+        press(handle, "1", cx);
+        wait_for_label(handle, "front-2", cx).await;
     }
 
     #[gpui_kit::test]

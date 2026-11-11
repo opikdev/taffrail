@@ -311,7 +311,8 @@ impl Inspect for PodRow {
         if !self.node.is_empty() {
             let node = ObjectLink::new("Node", "", self.node.clone());
             let text = self.node.clone();
-            fields = fields.child(field("Node", div().child(object_link(&node, text)), cx));
+            let link = v_flex().items_start().child(object_link(&node, text));
+            fields = fields.child(field("Node", link, cx));
         }
         if let Some(age) = age {
             fields = fields.child(field("Age", div().child(age), cx));

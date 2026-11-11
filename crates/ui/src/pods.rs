@@ -88,6 +88,13 @@ impl TableRow for PodRow {
     fn labels(&self) -> Option<&BTreeMap<String, String>> {
         Some(&self.labels)
     }
+
+    fn field(&self, name: &str) -> Option<&str> {
+        match name {
+            "spec.nodeName" => Some(&self.node),
+            _ => None,
+        }
+    }
 }
 
 impl PodTable {

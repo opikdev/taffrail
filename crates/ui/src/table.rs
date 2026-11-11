@@ -2,7 +2,7 @@
 //! selection that belongs to an object rather than to a position.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +11,7 @@ use gpui_kit::component::table::{Column, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{Follow, ObjectKey, Row, Selector, Snapshot};
+use taffrail_core::{Follow, ObjectKey, PodRow, Row, Selector, Snapshot};
 
 /// The height of one table row, which `Size::Small` sets.
 pub const ROW_HEIGHT: Pixels = px(30.);
@@ -63,6 +63,9 @@ pub enum CellStyle {
     Status,
     /// Right-aligned, with tabular figures.
     Number,
+    /// The pods the row holds, from [`TableRow::pod_count`], as a number. The column's
+    /// `text` and `compare` go unused.
+    PodCount,
 }
 
 /// One column of a resource table.
@@ -96,6 +99,50 @@ pub trait TableRow: Row {
     fn follow(&self) -> Option<Follow> {
         None
     }
+
+    /// The pods **Show its pods** narrows the pod view to, and the namespace to show them
+    /// in, or every namespace with `None`. A workload's pods are those it follows.
+    fn pods(&self) -> Option<(SelectorFilter, Option<String>)> {
+        let follow = self.follow()?;
+        let filter = SelectorFilter {
+            label: follow.label,
+            selector: RowMatch::Labels(follow.selector),
+        };
+        Some((filter, follow.namespace))
+    }
+
+    /// A field a [`RowMatch::Field`] can narrow by, such as a pod's `spec.nodeName`.
+    fn field(&self, _name: &str) -> Option<&str> {
+        None
+    }
+
+    /// How many pods this row holds, for a kind with a [`CellStyle::PodCount`] column.
+    fn pod_count(&self, _counts: &PodCounts) -> Option<usize> {
+        None
+    }
+}
+
+/// Pods by the node they run on and by namespace, counted from the pod watch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PodCounts {
+    pub by_node: HashMap<String, usize>,
+    pub by_namespace: HashMap<String, usize>,
+}
+
+impl PodCounts {
+    pub fn new(pods: &[Arc<PodRow>]) -> Self {
+        let mut counts = Self::default();
+        for pod in pods {
+            if !pod.node.is_empty() {
+                *counts.by_node.entry(pod.node.clone()).or_default() += 1;
+            }
+            *counts
+                .by_namespace
+                .entry(pod.namespace.clone())
+                .or_default() += 1;
+        }
+        counts
+    }
 }
 
 pub fn urgency<R: TableRow>(row: &R) -> u8 {
@@ -112,12 +159,30 @@ pub enum SortOrder {
     Descending,
 }
 
-/// Rows narrowed to those a label selector matches, with what to call it.
+/// Rows narrowed to those a label selector or a field matches, with what to call it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectorFilter {
-    /// Such as `deployment/checkout-api`.
+    /// Such as `deployment/checkout-api` or `node/node-07`.
     pub label: String,
-    pub selector: Selector,
+    pub selector: RowMatch,
+}
+
+/// What a [`SelectorFilter`] matches rows by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowMatch {
+    /// A label selector, for a workload's pods.
+    Labels(Selector),
+    /// A field that equals a value, such as a pod's `spec.nodeName`.
+    Field { name: &'static str, value: String },
+}
+
+impl RowMatch {
+    pub fn matches<R: TableRow>(&self, row: &R) -> bool {
+        match self {
+            Self::Labels(selector) => row.labels().is_some_and(|labels| selector.matches(labels)),
+            Self::Field { name, value } => row.field(name) == Some(value.as_str()),
+        }
+    }
 }
 
 pub struct ResourceTable<R> {
@@ -130,6 +195,7 @@ pub struct ResourceTable<R> {
     pub(crate) rows: Vec<Arc<R>>,
     selected: Option<ObjectKey>,
     pub(crate) selected_row: Option<usize>,
+    pod_counts: Arc<PodCounts>,
 }
 
 impl<R: TableRow> Default for ResourceTable<R> {
@@ -144,6 +210,7 @@ impl<R: TableRow> Default for ResourceTable<R> {
             rows: Vec::new(),
             selected: None,
             selected_row: None,
+            pod_counts: Arc::default(),
         }
     }
 }
@@ -216,6 +283,25 @@ impl<R: TableRow> ResourceTable<R> {
             .iter()
             .any(|row| row.namespace() == namespace);
         (!has_rows).then_some(namespace)
+    }
+
+    /// Whether a column counts pods, so the table wants [`PodCounts`].
+    pub fn counts_pods() -> bool {
+        R::COLUMNS
+            .iter()
+            .any(|column| column.style == CellStyle::PodCount)
+    }
+
+    pub fn set_pod_counts(&mut self, counts: Arc<PodCounts>) {
+        self.pod_counts = counts;
+        let sorted = self.sort.map(|(col_ix, _)| R::COLUMNS[col_ix].style);
+        if sorted == Some(CellStyle::PodCount) {
+            self.rebuild();
+        }
+    }
+
+    fn pod_count(&self, row: &R) -> Option<usize> {
+        row.pod_count(&self.pod_counts)
     }
 
     pub fn hidden_columns(&self) -> Vec<&'static str> {
@@ -324,14 +410,24 @@ impl<R: TableRow> ResourceTable<R> {
                     || self
                         .namespace()
                         .is_none_or(|namespace| row.namespace() == namespace);
-                let selected = selector.is_none_or(|selector| {
-                    row.labels().is_some_and(|labels| selector.matches(labels))
-                });
+                let selected = selector.is_none_or(|selector| selector.matches(row.as_ref()));
                 in_namespace && selected && row.matches(&filter)
             })
             .cloned()
             .collect();
-        sort_rows(&mut self.rows, self.sort);
+        match self.sort {
+            Some((col_ix, order)) if R::COLUMNS[col_ix].style == CellStyle::PodCount => {
+                let mut rows = std::mem::take(&mut self.rows);
+                match order {
+                    SortOrder::Ascending => rows.sort_by_cached_key(|row| self.pod_count(row)),
+                    SortOrder::Descending => {
+                        rows.sort_by_cached_key(|row| std::cmp::Reverse(self.pod_count(row)));
+                    }
+                }
+                self.rows = rows;
+            }
+            sort => sort_rows(&mut self.rows, sort),
+        }
         self.selected_row = self.selected.as_ref().and_then(|(namespace, name)| {
             self.rows
                 .iter()
@@ -343,7 +439,14 @@ impl<R: TableRow> ResourceTable<R> {
         let Some(row) = self.rows.get(row_ix) else {
             return SharedString::default();
         };
-        (R::COLUMNS[col_ix].text)(row, unix_now())
+        let column = &R::COLUMNS[col_ix];
+        match column.style {
+            CellStyle::PodCount => self
+                .pod_count(row)
+                .map(|count| format_count(count).into())
+                .unwrap_or_default(),
+            _ => (column.text)(row, unix_now()),
+        }
     }
 }
 
@@ -468,7 +571,7 @@ impl<R: TableRow> TableDelegate for ResourceTable<R> {
                 left: PANEL_EDGE_PADDING,
                 ..CELL_PADDING
             }),
-            (_, CellStyle::Number) => column.text_right(),
+            (_, CellStyle::Number | CellStyle::PodCount) => column.text_right(),
             _ => column,
         }
     }
@@ -493,7 +596,10 @@ impl<R: TableRow> TableDelegate for ResourceTable<R> {
             .size_full()
             .gap_1()
             .items_center()
-            .when(style == CellStyle::Number, |th| th.justify_end())
+            .when(
+                matches!(style, CellStyle::Number | CellStyle::PodCount),
+                |th| th.justify_end(),
+            )
             .child(name)
             .when_some(order, |th, order| {
                 th.child(
@@ -553,7 +659,9 @@ impl<R: TableRow> TableDelegate for ResourceTable<R> {
                     .child(div().size(px(STATUS_DOT)).rounded_full().bg(color))
                     .child(text)
             }
-            CellStyle::Number => div().font_features(tabular_figures()).child(text),
+            CellStyle::Number | CellStyle::PodCount => {
+                div().font_features(tabular_figures()).child(text)
+            }
         }
     }
 
