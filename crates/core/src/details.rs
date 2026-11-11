@@ -1,10 +1,39 @@
+use std::fmt::Debug;
+
 use k8s_openapi::api::core::v1::{ContainerState, ContainerStatus, Event, Pod};
 use kube::api::ListParams;
-use kube::{Api, Client};
+use kube::{Api, Client, Resource};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::cluster::ClusterError;
 
 const MAX_EVENTS: usize = 100;
+
+/// What the details panel shows of one kind of object beyond its table row, read when the
+/// panel opens and again while it stays open.
+pub trait ObjectDetails: Clone + Debug + PartialEq + Send + Sized + 'static {
+    type Object: Resource<DynamicType = ()>
+        + Clone
+        + Debug
+        + DeserializeOwned
+        + Serialize
+        + Send
+        + 'static;
+
+    /// Reads objects in `namespace`.
+    fn api(client: Client, namespace: &str) -> Api<Self::Object>;
+
+    /// Builds the details from an object and its events, which a role may not be allowed
+    /// to list.
+    fn read(object: Self::Object, events: Result<Vec<ObjectEvent>, String>)
+    -> Result<Self, String>;
+
+    /// The object as read-only YAML, without `managedFields`.
+    fn yaml(&self) -> &str;
+
+    fn events(&self) -> &Result<Vec<ObjectEvent>, String>;
+}
 
 /// What the details panel shows for one pod, read once.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,7 +44,7 @@ pub struct PodDetails {
     pub labels: Vec<(String, String)>,
     pub yaml: String,
     /// Kept apart from the pod, because a role can read pods without reading events.
-    pub events: Result<Vec<PodEvent>, String>,
+    pub events: Result<Vec<ObjectEvent>, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,8 +57,9 @@ pub struct ContainerDetails {
     pub last_exit: Option<String>,
 }
 
+/// An event about one object, such as a pod's `BackOff`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PodEvent {
+pub struct ObjectEvent {
     pub warning: bool,
     pub reason: String,
     pub message: String,
@@ -88,10 +118,10 @@ fn last_seen_unix(event: &Event) -> Option<i64> {
     seen.or(recorded).or(first).map(|time| time.as_second())
 }
 
-fn newest_events(events: Vec<Event>) -> Vec<PodEvent> {
+fn newest_events(events: Vec<Event>) -> Vec<ObjectEvent> {
     let mut events: Vec<_> = events
         .iter()
-        .map(|event| PodEvent {
+        .map(|event| ObjectEvent {
             warning: event.type_.as_deref() == Some("Warning"),
             reason: event.reason.clone().unwrap_or_default(),
             message: event.message.clone().unwrap_or_default(),
@@ -104,15 +134,16 @@ fn newest_events(events: Vec<Event>) -> Vec<PodEvent> {
     events
 }
 
-fn to_yaml(pod: &mut Pod) -> Result<String, serde_saphyr::ser_error::Error> {
-    // Field ownership is bookkeeping for the API server, and it is longer than the pod.
-    pod.metadata.managed_fields = None;
-    serde_saphyr::to_string(pod)
+/// An object as YAML. Field ownership is bookkeeping for the API server, and it is longer
+/// than most objects, so it is left out.
+pub(crate) fn to_yaml<K: Resource + Serialize>(object: &mut K) -> Result<String, String> {
+    object.meta_mut().managed_fields = None;
+    serde_saphyr::to_string(object).map_err(|error| error.to_string())
 }
 
 impl PodDetails {
-    fn new(mut pod: Pod, events: Result<Vec<Event>, String>) -> Result<Self, String> {
-        let yaml = to_yaml(&mut pod).map_err(|error| error.to_string())?;
+    fn new(mut pod: Pod, events: Result<Vec<ObjectEvent>, String>) -> Result<Self, String> {
+        let yaml = to_yaml(&mut pod)?;
         Ok(Self {
             owner: pod
                 .metadata
@@ -131,38 +162,60 @@ impl PodDetails {
                 .into_iter()
                 .collect(),
             yaml,
-            events: events.map(newest_events),
+            events,
         })
     }
 }
 
-pub(crate) async fn load(
+impl ObjectDetails for PodDetails {
+    type Object = Pod;
+
+    fn api(client: Client, namespace: &str) -> Api<Pod> {
+        Api::namespaced(client, namespace)
+    }
+
+    fn read(pod: Pod, events: Result<Vec<ObjectEvent>, String>) -> Result<Self, String> {
+        Self::new(pod, events)
+    }
+
+    fn yaml(&self) -> &str {
+        &self.yaml
+    }
+
+    fn events(&self) -> &Result<Vec<ObjectEvent>, String> {
+        &self.events
+    }
+}
+
+/// Reads one object and its newest events.
+pub(crate) async fn load<D: ObjectDetails>(
     client: Client,
     namespace: String,
     name: String,
-) -> Result<PodDetails, ClusterError> {
-    let failed = |error: String| ClusterError::PodDetails {
-        pod: format!("{namespace}/{name}"),
+) -> Result<D, ClusterError> {
+    let kind = D::Object::kind(&());
+    let failed = |error: String| ClusterError::ReadObject {
+        object: format!("{} {namespace}/{name}", kind.to_lowercase()),
         error,
     };
-    let pod = Api::<Pod>::namespaced(client.clone(), &namespace)
+    let object = D::api(client.clone(), &namespace)
         .get(&name)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    let selector = format!("involvedObject.kind=Pod,involvedObject.name={name}");
+    let selector = format!("involvedObject.kind={kind},involvedObject.name={name}");
     let events = Api::<Event>::namespaced(client, &namespace)
         .list(&ListParams::default().fields(&selector))
         .await
-        .map(|events| events.items)
+        .map(|events| newest_events(events.items))
         .map_err(|error| error.to_string());
-    PodDetails::new(pod, events).map_err(failed)
+    D::read(object, events).map_err(failed)
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::{from_value, json};
 
-    use super::{ContainerDetails, PodDetails, PodEvent};
+    use super::{ContainerDetails, ObjectEvent, PodDetails, newest_events};
     use k8s_openapi::api::core::v1::{Event, Pod};
 
     fn pod() -> Pod {
@@ -253,18 +306,18 @@ mod tests {
             event("Normal", "Pulled", "2026-11-07T10:00:00Z"),
             event("Warning", "BackOff", "2026-11-07T10:05:00Z"),
         ];
-        let details = PodDetails::new(pod(), Ok(events)).unwrap();
+        let details = PodDetails::new(pod(), Ok(newest_events(events))).unwrap();
         assert_eq!(
             details.events.unwrap(),
             vec![
-                PodEvent {
+                ObjectEvent {
                     warning: true,
                     reason: "BackOff".into(),
                     message: "details".into(),
                     count: 3,
                     last_seen_unix: Some(1_794_045_900),
                 },
-                PodEvent {
+                ObjectEvent {
                     warning: false,
                     reason: "Pulled".into(),
                     message: "details".into(),

@@ -18,6 +18,8 @@ AI agents do the development here. Read this first, then [the roadmap](docs/road
 
 This boundary limits the cost of leaving GPUI, so keep it strict. `deny.toml` enforces it, along with the license rules.
 
+Every resource view shares one watch, table and details panel. To add one, follow [Add a resource view](docs/how-to/add-a-resource-view.md).
+
 ## Work rules
 
 - Look at UI changes before calling them done. See [Preview the UI](docs/how-to/preview-the-ui.md).

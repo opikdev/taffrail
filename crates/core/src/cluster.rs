@@ -10,11 +10,12 @@ use tokio::runtime::{self, Runtime};
 
 use std::sync::Arc;
 
-use crate::details::{self, PodDetails};
+use crate::details::{self, ObjectDetails};
 use crate::environment::{self, ShellEnvironment};
 use crate::follow::{self, Follow};
 use crate::logs::{self, LogTail, LogTarget};
-use crate::pods::{self, PodFeed, PodRow, PodWatch};
+use crate::pods::{PodFeed, PodRow};
+use crate::watch::{self, ResourceWatch, Row};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_THREADS: usize = 2;
@@ -40,8 +41,8 @@ pub enum ClusterError {
         context: String,
         source: tokio::task::JoinError,
     },
-    #[error("Failed to read pod {pod}: {error}")]
-    PodDetails { pod: String, error: String },
+    #[error("Failed to read {object}: {error}")]
+    ReadObject { object: String, error: String },
     #[error("{pod} has no workload to follow")]
     NoWorkload { pod: String },
     #[error("Following a {workload} is not supported")]
@@ -143,6 +144,7 @@ impl Contexts {
                 context: context.clone(),
                 source,
             })?;
+        let namespace = config.default_namespace.clone();
         let request = async {
             let client = Client::try_from(config)?;
             let version = client.apiserver_version().await?;
@@ -158,6 +160,7 @@ impl Contexts {
         Ok(Connection {
             context,
             server_version: version.git_version,
+            namespace,
             client,
         })
     }
@@ -188,6 +191,8 @@ fn read_kubeconfig(environment: &ShellEnvironment) -> Result<Kubeconfig, Kubecon
 pub struct Connection {
     pub context: String,
     pub server_version: String,
+    /// The context's namespace, or `default` if it names none.
+    pub namespace: String,
     pub(crate) client: Client,
 }
 
@@ -218,26 +223,33 @@ impl Backend {
         }
     }
 
-    /// Watches every pod the connection can see, until the returned watch is dropped.
-    pub fn watch_pods(&self, connection: &Connection) -> PodWatch {
+    /// Watches the objects of kind `R` across all namespaces, until the returned watch is
+    /// dropped. If the connection may not list them there, it watches `namespace` instead.
+    pub fn watch<R: Row>(
+        &self,
+        connection: &Connection,
+        namespace: Option<String>,
+    ) -> ResourceWatch<R> {
         let _runtime = self.runtime.enter();
-        pods::watch(connection.client.clone())
+        watch::start(connection.client.clone(), namespace)
     }
 
-    /// Reads one pod and its recent events.
-    pub fn pod_details(
+    /// Reads one object and its recent events.
+    pub fn details<D: ObjectDetails>(
         &self,
         connection: &Connection,
         namespace: String,
         name: String,
-    ) -> impl Future<Output = Result<PodDetails, ClusterError>> + use<> {
-        let pod = format!("{namespace}/{name}");
-        let task = self
-            .runtime
-            .spawn(details::load(connection.client.clone(), namespace, name));
+    ) -> impl Future<Output = Result<D, ClusterError>> + use<D> {
+        let object = format!("{namespace}/{name}");
+        let task = self.runtime.spawn(details::load::<D>(
+            connection.client.clone(),
+            namespace,
+            name,
+        ));
         async move {
-            task.await.map_err(|error| ClusterError::PodDetails {
-                pod,
+            task.await.map_err(|error| ClusterError::ReadObject {
+                object,
                 error: error.to_string(),
             })?
         }

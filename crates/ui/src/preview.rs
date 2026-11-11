@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use gpui_kit::assets::AllAssets;
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::*;
 use taffrail_core::{Backend, ClusterError, Contexts, MAX_TAIL_PODS, SavedState};
 
 use crate::fake_api::{Fixture, kubeconfig, serve};
 use crate::palette::ShowAbout;
 use crate::root::Root;
+use crate::views::View;
 
 const WINDOW: (f32, f32) = (1360., 860.);
 const NARROW_WINDOW: (f32, f32) = (760., 480.);
@@ -161,6 +162,92 @@ fn app_label(name: &str) -> &str {
     name.rsplit_once('-')
         .filter(|(_, hash)| hash.len() >= 5 && hash.chars().any(|char| char.is_ascii_digit()))
         .map_or(name, |(app, _)| app)
+}
+
+/// Deployments as `(namespace, name, desired, ready, updated, available, conditions)`, with
+/// a stalled rollout, one that cannot become available, one in progress and one scaled down.
+const DEPLOYMENTS: [(&str, &str, u32, u32, u32, u32, &str); 9] = [
+    (
+        "payments",
+        "checkout-api",
+        6,
+        3,
+        3,
+        3,
+        r#"{"type":"Available","status":"True","reason":"MinimumReplicasAvailable","message":"Deployment has minimum availability."},{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded","message":"ReplicaSet \"checkout-api-7f9c6d\" has timed out progressing."}"#,
+    ),
+    ("payments", "fraud-score", 6, 6, 6, 6, AVAILABLE),
+    ("payments", "payments-worker", 6, 6, 6, 6, AVAILABLE),
+    ("payments", "ledger-sync", 0, 0, 0, 0, AVAILABLE),
+    ("storefront", "catalog-api", 6, 6, 6, 6, AVAILABLE),
+    (
+        "storefront",
+        "image-resizer",
+        6,
+        0,
+        6,
+        0,
+        r#"{"type":"Available","status":"False","reason":"MinimumReplicasUnavailable","message":"Deployment does not have minimum availability."},{"type":"Progressing","status":"True","reason":"ReplicaSetUpdated","message":"ReplicaSet \"image-resizer-59c7d\" is progressing."}"#,
+    ),
+    (
+        "storefront",
+        "search-indexer",
+        6,
+        6,
+        4,
+        6,
+        r#"{"type":"Available","status":"True","reason":"MinimumReplicasAvailable","message":"Deployment has minimum availability."},{"type":"Progressing","status":"True","reason":"ReplicaSetUpdated","message":"ReplicaSet \"search-indexer-7c6f9\" is progressing."}"#,
+    ),
+    ("ingress", "ingress-nginx-controller", 6, 6, 6, 6, AVAILABLE),
+    (
+        "observability",
+        "otel-collector-gateway",
+        6,
+        6,
+        6,
+        6,
+        AVAILABLE,
+    ),
+];
+const AVAILABLE: &str = r#"{"type":"Available","status":"True","reason":"MinimumReplicasAvailable","message":"Deployment has minimum availability."},{"type":"Progressing","status":"True","reason":"NewReplicaSetAvailable","message":"ReplicaSet has successfully progressed."}"#;
+
+fn deployment_body(index: usize, created: &str) -> String {
+    let (namespace, name, desired, ready, updated, available, conditions) = DEPLOYMENTS[index];
+    let unavailable = desired.saturating_sub(available);
+    format!(
+        r#"{{"apiVersion":"apps/v1","kind":"Deployment","metadata":{{"namespace":"{namespace}","name":"{name}","uid":"d-{name}","resourceVersion":"1","generation":3,"creationTimestamp":"{created}","labels":{{"app":"{name}","tier":"backend"}},"managedFields":[{{"manager":"kubectl"}}]}},"spec":{{"replicas":{desired},"selector":{{"matchLabels":{{"app":"{name}"}}}},"strategy":{{"type":"RollingUpdate","rollingUpdate":{{"maxSurge":"25%","maxUnavailable":"25%"}}}},"template":{{"metadata":{{"labels":{{"app":"{name}"}}}},"spec":{{"containers":[{{"name":"app","image":"registry.example.com/{name}:2.31.0"}},{{"name":"proxy","image":"registry.example.com/envoy:1.30.2"}}]}}}}}},"status":{{"observedGeneration":3,"replicas":{desired},"readyReplicas":{ready},"updatedReplicas":{updated},"availableReplicas":{available},"unavailableReplicas":{unavailable},"conditions":[{conditions}]}}}}"#
+    )
+}
+
+fn deployment_list(created: &str) -> String {
+    let items: Vec<_> = (0..DEPLOYMENTS.len())
+        .map(|index| deployment_body(index, created))
+        .collect();
+    format!(
+        r#"{{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+        items.join(",")
+    )
+}
+
+/// The Deployments list, and each Deployment by path, for the Deployments view and its
+/// details.
+fn deployment_objects(created: &str) -> Vec<(String, String)> {
+    let mut objects = vec![(
+        "/apis/apps/v1/deployments".to_owned(),
+        deployment_list(created),
+    )];
+    objects.extend(
+        DEPLOYMENTS
+            .iter()
+            .enumerate()
+            .map(|(index, (namespace, name, ..))| {
+                (
+                    format!("/apis/apps/v1/namespaces/{namespace}/deployments/{name}"),
+                    deployment_body(index, created),
+                )
+            }),
+    );
+    objects
 }
 
 /// The ReplicaSets of the `checkout-api` rollout and their Deployment, for following it.
@@ -380,6 +467,15 @@ impl Scene {
             .expect("preview window closed");
     }
 
+    fn show_view(&mut self, view: View) {
+        let (handle, root) = (self.handle, self.root.clone());
+        self.cx
+            .update_window(handle, |_, window, cx| {
+                root.update(cx, |root, cx| root.show_view(view, window, cx));
+            })
+            .expect("preview window closed");
+    }
+
     fn set_log_filter(&mut self, query: &str, severity: usize) {
         let (handle, root) = (self.handle, self.root.clone());
         self.cx
@@ -462,6 +558,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: log_body(),
         live_logs: None,
+        forbidden: Vec::new(),
         reconnect_logs: None,
         objects: workload_objects(),
     });
@@ -473,6 +570,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: String::new(),
         live_logs: Some(&LOG_LINES),
+        forbidden: Vec::new(),
         reconnect_logs: None,
         objects: workload_objects(),
     });
@@ -505,6 +603,7 @@ pub fn run(directory: PathBuf) {
         events: events_body(),
         logs: stamped(&FORMAT_LINES, FORMAT_LINES.len()),
         live_logs: None,
+        forbidden: Vec::new(),
         reconnect_logs: None,
         objects: workload_objects(),
     });
@@ -539,6 +638,7 @@ pub fn run(directory: PathBuf) {
             events: events_body(),
             logs: stamped(&FORMAT_LINES, 6),
             live_logs: None,
+            forbidden: Vec::new(),
             objects: workload_objects(),
             reconnect_logs: Some(stamped_from(&FORMAT_LINES[6..], 8, 31)),
         });
@@ -567,6 +667,7 @@ pub fn run(directory: PathBuf) {
             events: events_body(),
             logs: timeline_body(0..300),
             live_logs: None,
+            forbidden: Vec::new(),
             objects: workload_objects(),
             reconnect_logs: Some(timeline_body(360..600)),
         });
@@ -802,6 +903,45 @@ pub fn run(directory: PathBuf) {
         })
         .expect("preview window closed");
     narrow.save(&directory, "narrow-columns-menu-dark.png");
+
+    let deployments = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects: [deployment_objects(created), workload_objects()].concat(),
+    });
+    let refused = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: vec!["/apis/apps/v1/deployments"],
+        reconnect_logs: None,
+        objects: workload_objects(),
+    });
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut table = connected(&deployments, mode);
+        table.show_view(View::Deployments);
+        table.wait_until(|window, _| !window.find_all_by_label("checkout-api").is_empty());
+        table.save(&directory, &format!("deployments-{suffix}.png"));
+        let root = table.root.clone();
+        table
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        table.wait_until(|window, _| window.try_find("details-title").is_some());
+        table.settle();
+        table.save(&directory, &format!("deployment-details-{suffix}.png"));
+
+        let mut forbidden = connected(&refused, mode);
+        forbidden.show_view(View::Deployments);
+        forbidden.wait_until(|window, _| window.try_find("notice-action").is_some());
+        forbidden.save(&directory, &format!("no-permission-{suffix}.png"));
+    }
 
     let mut empty = connected(&server, ThemeMode::Light);
     empty.set_namespace("billing");

@@ -902,6 +902,7 @@ mod tests {
         use crate::fake_api::{self, log_line};
         use crate::pods::PodRow;
         use crate::selector::Selector;
+        use crate::watch::Row;
 
         fn pod(name: &str, app: &str) -> Arc<PodRow> {
             Arc::new(PodRow {
@@ -962,7 +963,8 @@ mod tests {
                 watch::channel(snapshot(vec![pod("api-1", "api"), pod("web-1", "web")]));
             let selector =
                 Follow::selector(Some("shop".into()), Selector::parse("app=api").unwrap());
-            let mut tail = follow(connection.client, PodFeed(received), selector).unwrap();
+            let mut tail =
+                follow(connection.client, crate::watch::Feed(received), selector).unwrap();
 
             let progress = wait_for(&mut tail, |progress, reader| {
                 has_line(reader, progress, "api-1")
@@ -1004,7 +1006,8 @@ mod tests {
             let connection = fake_api::connect(Vec::new()).await;
             let (feed, received) = watch::channel(Arc::new(PodSnapshot::default()));
             let selector = Follow::selector(None, Selector::parse("app=api").unwrap());
-            let mut tail = follow(connection.client, PodFeed(received), selector).unwrap();
+            let mut tail =
+                follow(connection.client, crate::watch::Feed(received), selector).unwrap();
 
             feed.send(snapshot(vec![pod("api-1", "api")])).unwrap();
             let progress = wait_for(&mut tail, |progress, _| progress.following.is_some()).await;

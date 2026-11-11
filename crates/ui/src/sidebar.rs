@@ -1,18 +1,21 @@
 use gpui_kit::IntoElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::palette::ShowView;
+use crate::table::format_count;
+use crate::views::View;
+
 pub const SIDEBAR_WIDTH: f32 = 216.;
 
-const PODS: &str = "Pods";
 const GROUPS: [(&str, &[(&str, IconName)]); 4] = [
     (
         "Workloads",
         &[
-            (PODS, IconName::Box),
+            ("Pods", IconName::Box),
             ("Deployments", IconName::Layers),
             ("StatefulSets", IconName::Database),
             ("DaemonSets", IconName::Boxes),
@@ -44,9 +47,20 @@ const GROUPS: [(&str, &[(&str, IconName)]); 4] = [
     ),
 ];
 
-/// The resource navigation. Only Pods exists so far, so the rest are disabled.
+/// What the sidebar shows for one view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidebarItem {
+    pub view: View,
+    pub active: bool,
+    /// How many objects its watch lists, once it has.
+    pub count: Option<usize>,
+    /// Whether the API refused to list them, which a lock marks.
+    pub forbidden: bool,
+}
+
+/// The resource navigation. Resources without a view yet are disabled.
 pub fn resource_sidebar(
-    pod_count: Option<usize>,
+    items: &[SidebarItem],
     collapsed: bool,
     footer: impl IntoElement,
 ) -> Sidebar<SidebarGroup<SidebarMenu>> {
@@ -59,17 +73,36 @@ pub fn resource_sidebar(
             SidebarGroup::new(group).child(SidebarMenu::new().gap_0p5().mb_3().children(
                 resources.iter().map(|&(name, icon)| {
                     let item = SidebarMenuItem::new(name).icon(Icon::new(icon));
-                    if name != PODS {
+                    let Some(&SidebarItem {
+                        view,
+                        active,
+                        count,
+                        forbidden,
+                    }) = items.iter().find(|item| item.view.name() == name)
+                    else {
                         return item.disable(true);
-                    }
-                    item.active(true).suffix(move |_, cx| {
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .when_some(pod_count, |count, pods| {
-                                count.child(crate::pods::format_count(pods))
-                            })
-                    })
+                    };
+                    let label = match forbidden {
+                        true => format!("{name}, no permission"),
+                        false => name.to_owned(),
+                    };
+                    item.active(active)
+                        .accessibility_label(label)
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(Box::new(ShowView { view }), cx);
+                        })
+                        .suffix(move |_, cx| {
+                            let muted = cx.theme().muted_foreground;
+                            h_flex()
+                                .text_xs()
+                                .text_color(muted)
+                                .when(forbidden, |suffix| {
+                                    suffix.child(Icon::new(IconName::Lock).size_3())
+                                })
+                                .when_some(count.filter(|_| !forbidden), |suffix, count| {
+                                    suffix.child(format_count(count))
+                                })
+                        })
                 }),
             ))
         }))

@@ -5,9 +5,10 @@ use gpui_kit::component::command::{CommandGroup, CommandItem};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{PodKey, PodRow, Selector};
+use taffrail_core::{PodKey, PodRow, Row, Selector};
 
-use crate::pods::urgency;
+use crate::table::urgency;
+use crate::views::View;
 use crate::windows::NewWindow;
 
 /// How many pods a search lists, so that large clusters stay quick to search.
@@ -37,8 +38,17 @@ actions!(
         ToggleSidebar,
         ReloadContexts,
         CloseWindow,
+        ShowPods,
+        ClearSelector,
     ]
 );
+
+/// Opens a resource view.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct ShowView {
+    pub view: View,
+}
 
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = taffrail, no_json)]
@@ -67,14 +77,16 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 20] = [
+pub const SHORTCUTS: [(&str, &str); 22] = [
     (MODIFIER_K, "Open the command palette"),
-    ("/", "Filter pods"),
+    ("1  2", "Go to Pods or Deployments"),
+    ("/", "Filter the current view"),
     ("f", "Filter log lines"),
     ("j  k", "Move through rows"),
     ("Enter", "Open details"),
     ("l", "Tail logs for the selection"),
-    ("w", "Tail the selected pod's workload"),
+    ("w", "Tail the selected workload"),
+    ("p", "Show the selected workload's pods"),
     ("y", "Show YAML"),
     ("e", "Show events"),
     ("s", "Show summary"),
@@ -127,6 +139,7 @@ pub const PALETTE_KEY: &str = MODIFIER_K;
 /// What the palette can offer at this moment.
 pub struct PaletteSource<'a> {
     pub query: &'a str,
+    pub view: View,
     pub rows: &'a [Arc<PodRow>],
     pub contexts: Vec<String>,
     pub current_context: Option<String>,
@@ -157,7 +170,7 @@ pub fn matching_pods<'a>(rows: &'a [Arc<PodRow>], query: &str) -> Vec<&'a PodRow
         .filter(|row| row.matches(query))
         .map(Arc::as_ref)
         .collect();
-    pods.sort_by_cached_key(|row| urgency(row));
+    pods.sort_by_cached_key(|row| urgency::<PodRow>(row));
     pods.truncate(MAX_POD_RESULTS);
     pods
 }
@@ -199,15 +212,28 @@ fn pod_item(row: &PodRow) -> CommandItem {
 /// The palette's entries. Each one dispatches an action, so a command behaves the same from
 /// the palette, a key or a button.
 pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
-    let mut actions = CommandGroup::new().label("Commands").item(command(
-        "Filter pods",
-        IconName::Search,
-        FocusFilter,
-    ));
-    if source.connected {
+    let filter_label = format!("Filter {}", source.view.name().to_lowercase());
+    let mut actions = CommandGroup::new().label("Commands").item(
+        CommandItem::new()
+            .label(filter_label)
+            .icon(Icon::new(IconName::Search))
+            .action(Box::new(FocusFilter)),
+    );
+    if source.connected && source.view == View::Pods {
         actions = actions.item(command("Tail logs", IconName::ScrollText, TailSelection));
     }
-    if source.connected && source.has_selection {
+    if source.connected && source.has_selection && source.view != View::Pods {
+        actions = actions
+            .item(
+                command("Tail its pods", IconName::ScrollText, TailWorkload)
+                    .keywords(["follow", "logs", "workload", "rollout"]),
+            )
+            .item(
+                command("Show its pods", IconName::Box, ShowPods)
+                    .keywords(["selector", "workload"]),
+            );
+    }
+    if source.connected && source.has_selection && source.view == View::Pods {
         actions = actions.item(
             command("Tail its workload", IconName::ScrollText, TailWorkload).keywords([
                 "follow",
@@ -264,6 +290,16 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
             .item(command("Show summary", IconName::Info, ShowSummary))
             .item(command("Show events", IconName::Activity, ShowEvents))
             .item(command("Show YAML", IconName::FileText, ShowYaml));
+    }
+    for view in View::ALL {
+        actions = actions.item(
+            CommandItem::new()
+                .label(format!("Go to {}", view.name()))
+                .icon(Icon::new(view.icon()))
+                .keywords(["view", "resource", view.group()])
+                .checked(view == source.view)
+                .action(Box::new(ShowView { view })),
+        );
     }
     actions = actions
         .item(command(
