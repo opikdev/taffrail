@@ -300,6 +300,15 @@ mod tests {
     }
 
     #[test]
+    fn the_text_filter_ignores_case_and_spans_namespace_and_name() {
+        let mut table = across_namespaces();
+        table.set_filter("PAYMENTS/B".into());
+        assert_eq!(pod_names(&table), ["b"]);
+        table.set_filter(String::new());
+        assert_eq!(pod_names(&table), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
     fn a_new_snapshot_stays_in_the_chosen_namespace() {
         let mut table = across_namespaces();
         table.set_namespace(Some("shop".into()));
