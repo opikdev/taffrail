@@ -127,7 +127,8 @@ where
         })
 }
 
-fn controller(meta: &ObjectMeta) -> Option<(&str, &str)> {
+/// The kind and name of the object that controls this one, such as a pod's ReplicaSet.
+pub(crate) fn controller(meta: &ObjectMeta) -> Option<(&str, &str)> {
     meta.owner_references
         .iter()
         .flatten()

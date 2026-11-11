@@ -1,5 +1,7 @@
 use std::fmt::Debug;
+use std::future::Future;
 
+use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::{ContainerState, ContainerStatus, Event, Pod};
 use kube::api::ListParams;
 use kube::{Api, Client, Resource};
@@ -7,6 +9,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::cluster::ClusterError;
+use crate::follow::controller;
+use crate::links::ObjectLink;
 
 const MAX_EVENTS: usize = 100;
 
@@ -29,6 +33,12 @@ pub trait ObjectDetails: Clone + Debug + PartialEq + Send + Sized + 'static {
     fn read(object: Self::Object, events: Result<Vec<ObjectEvent>, String>)
     -> Result<Self, String>;
 
+    /// Reads what the details name beyond the object, such as the Deployment behind a
+    /// pod's ReplicaSet. Most kinds name nothing more.
+    fn resolve(self, _client: Client) -> impl Future<Output = Self> + Send {
+        async { self }
+    }
+
     /// The object as read-only YAML, without `managedFields`.
     fn yaml(&self) -> &str;
 
@@ -38,7 +48,11 @@ pub trait ObjectDetails: Clone + Debug + PartialEq + Send + Sized + 'static {
 /// What the details panel shows for one pod, read once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PodDetails {
-    pub owner: Option<String>,
+    /// The object that controls the pod, such as its ReplicaSet.
+    pub controller: Option<ObjectLink>,
+    /// The Deployment behind a controlling ReplicaSet, or why it could not be found. `None`
+    /// when the controller is the workload itself.
+    pub workload: Option<Result<ObjectLink, String>>,
     pub pod_ip: Option<String>,
     pub containers: Vec<ContainerDetails>,
     pub labels: Vec<(String, String)>,
@@ -144,14 +158,11 @@ pub(crate) fn to_yaml<K: Resource + Serialize>(object: &mut K) -> Result<String,
 impl PodDetails {
     fn new(mut pod: Pod, events: Result<Vec<ObjectEvent>, String>) -> Result<Self, String> {
         let yaml = to_yaml(&mut pod)?;
+        let namespace = pod.metadata.namespace.clone().unwrap_or_default();
         Ok(Self {
-            owner: pod
-                .metadata
-                .owner_references
-                .iter()
-                .flatten()
-                .find(|owner| owner.controller == Some(true))
-                .map(|owner| format!("{}/{}", owner.kind, owner.name)),
+            controller: controller(&pod.metadata)
+                .map(|(kind, name)| ObjectLink::new(kind, namespace, name)),
+            workload: None,
             pod_ip: pod.status.as_ref().and_then(|status| status.pod_ip.clone()),
             containers: container_details(&pod),
             labels: pod
@@ -176,6 +187,28 @@ impl ObjectDetails for PodDetails {
 
     fn read(pod: Pod, events: Result<Vec<ObjectEvent>, String>) -> Result<Self, String> {
         Self::new(pod, events)
+    }
+
+    /// Reads a controlling ReplicaSet to find its Deployment, as following a pod's workload
+    /// does.
+    async fn resolve(mut self, client: Client) -> Self {
+        let Some(set) = self
+            .controller
+            .as_ref()
+            .filter(|controller| controller.kind == "ReplicaSet")
+        else {
+            return self;
+        };
+        let read = Api::<ReplicaSet>::namespaced(client, &set.namespace)
+            .get(&set.name)
+            .await;
+        self.workload = match read {
+            Ok(read) => controller(&read.metadata)
+                .filter(|(kind, _)| *kind == "Deployment")
+                .map(|(kind, name)| Ok(ObjectLink::new(kind, set.namespace.clone(), name))),
+            Err(error) => Some(Err(api_reason(&error))),
+        };
+        self
     }
 
     fn yaml(&self) -> &str {
@@ -203,19 +236,34 @@ pub(crate) async fn load<D: ObjectDetails>(
         .await
         .map_err(|error| failed(error.to_string()))?;
     let selector = format!("involvedObject.kind={kind},involvedObject.name={name}");
+    let client_for_resolve = client.clone();
     let events = Api::<Event>::namespaced(client, &namespace)
         .list(&ListParams::default().fields(&selector))
         .await
         .map(|events| newest_events(events.items))
         .map_err(|error| error.to_string());
-    D::read(object, events).map_err(failed)
+    let details = D::read(object, events).map_err(failed)?;
+    Ok(details.resolve(client_for_resolve).await)
+}
+
+/// The API's own reason for a failed request, such as an RBAC refusal, without the
+/// client's wrapping.
+pub(crate) fn api_reason(error: &kube::Error) -> String {
+    match error {
+        kube::Error::Api(status) if !status.message.is_empty() => status.message.clone(),
+        error => error.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::{from_value, json};
 
-    use super::{ContainerDetails, ObjectEvent, PodDetails, newest_events};
+    use std::sync::Arc;
+
+    use super::{ContainerDetails, ObjectEvent, PodDetails, load, newest_events};
+    use crate::fake_api::{self, Reply, Request};
+    use crate::links::ObjectLink;
     use k8s_openapi::api::core::v1::{Event, Pod};
 
     fn pod() -> Pod {
@@ -261,7 +309,10 @@ mod tests {
     #[test]
     fn summarizes_the_owner_address_and_labels() {
         let details = PodDetails::new(pod(), Ok(vec![])).unwrap();
-        assert_eq!(details.owner.as_deref(), Some("ReplicaSet/api-7f9c"));
+        assert_eq!(
+            details.controller,
+            Some(ObjectLink::new("ReplicaSet", "shop", "api-7f9c"))
+        );
         assert_eq!(details.pod_ip.as_deref(), Some("10.4.0.7"));
         assert_eq!(details.labels[0], ("app".to_owned(), "api".to_owned()));
     }
@@ -326,6 +377,72 @@ mod tests {
                 },
             ]
         );
+    }
+
+    const OWNED_POD: &str = r#"{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"shop","name":"api-1","ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"api-7f9c","uid":"r","controller":true}]},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]}}"#;
+    const REPLICA_SET: &str = r#"{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"namespace":"shop","name":"api-7f9c","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"api","uid":"d","controller":true}]},"spec":{"selector":{}}}"#;
+    const POD_PATH: &str = "/api/v1/namespaces/shop/pods/api-1";
+    const SET_PATH: &str = "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c";
+
+    async fn load_pod(handler: fake_api::Handler) -> PodDetails {
+        let connection = fake_api::connect_with(handler).await;
+        load::<PodDetails>(connection.client, "shop".into(), "api-1".into())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pods_replica_set_resolves_to_its_deployment() {
+        let details = load_pod(Arc::new(|request: &Request| match request.path.as_str() {
+            POD_PATH => Some(Reply::Json(OWNED_POD.into())),
+            SET_PATH => Some(Reply::Json(REPLICA_SET.into())),
+            _ => None,
+        }))
+        .await;
+
+        assert_eq!(
+            details.controller,
+            Some(ObjectLink::new("ReplicaSet", "shop", "api-7f9c"))
+        );
+        assert_eq!(
+            details.workload,
+            Some(Ok(ObjectLink::new("Deployment", "shop", "api")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_replica_set_says_why_and_keeps_the_pod() {
+        let details = load_pod(Arc::new(|request: &Request| match request.path.as_str() {
+            POD_PATH => Some(Reply::Json(OWNED_POD.into())),
+            SET_PATH => Some(Reply::Forbidden(
+                "replicasets.apps \\\"api-7f9c\\\" is forbidden: User \\\"jane\\\" cannot get resource",
+            )),
+            _ => None,
+        }))
+        .await;
+
+        let Some(Err(reason)) = &details.workload else {
+            panic!("expected a refusal, got {:?}", details.workload);
+        };
+        assert!(reason.starts_with("replicasets.apps"), "{reason}");
+        assert!(reason.contains("cannot get resource"), "{reason}");
+        assert_eq!(details.containers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pod_without_a_replica_set_reads_nothing_more() {
+        let details = load_pod(Arc::new(|request: &Request| match request.path.as_str() {
+            POD_PATH => Some(Reply::Json(OWNED_POD.replace("ReplicaSet", "StatefulSet"))),
+            SET_PATH => panic!("read a ReplicaSet the pod does not name"),
+            _ => None,
+        }))
+        .await;
+
+        assert_eq!(
+            details.controller,
+            Some(ObjectLink::new("StatefulSet", "shop", "api-7f9c"))
+        );
+        assert_eq!(details.workload, None);
     }
 
     #[test]

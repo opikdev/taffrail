@@ -10,12 +10,14 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, h_flex, v_flex}
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, ContainerDetails, ObjectDetails, ObjectEvent, PodDetails,
-    PodRow,
+    Backend, ClusterError, Connection, ContainerDetails, ObjectDetails, ObjectEvent, ObjectLink,
+    PodDetails, PodRow,
 };
 
+use crate::palette::OpenLink;
 use crate::pods::status_tone;
 use crate::table::{TableRow, Tone, format_age, unix_now};
+use crate::views::View;
 
 pub const DETAILS_WIDTH: f32 = 380.;
 
@@ -303,12 +305,16 @@ impl Inspect for PodRow {
         fields = fields.child(field("Ready", div().child(self.ready.clone()), cx));
         fields = fields.child(field("Restarts", div().child(restarts), cx));
         fields = fields.child(field("Namespace", div().child(self.namespace.clone()), cx));
-        fields = fields.child(field("Node", div().child(self.node.clone()), cx));
+        if !self.node.is_empty() {
+            let node = ObjectLink::new("Node", "", self.node.clone());
+            let text = self.node.clone();
+            fields = fields.child(field("Node", div().child(object_link(&node, text)), cx));
+        }
         if let Some(age) = age {
             fields = fields.child(field("Age", div().child(age), cx));
         }
-        if let Some(owner) = details.and_then(|details| details.owner.clone()) {
-            fields = fields.child(field("Owner", div().child(owner), cx));
+        if let Some(owner) = owner_field(self, details, cx) {
+            fields = fields.child(field("Owner", owner, cx));
         }
         if let Some(ip) = details.and_then(|details| details.pod_ip.clone()) {
             fields = fields.child(field("Pod IP", div().child(ip), cx));
@@ -346,6 +352,77 @@ impl Inspect for PodRow {
             })
             .into_any_element()
     }
+}
+
+/// The pod's controller, led by the Deployment behind it once that is read, such as
+/// **deployment/api** via **replicaset/api-7f9c**.
+fn owner_field(pod: &PodRow, details: Option<&PodDetails>, cx: &App) -> Option<Div> {
+    let muted = cx.theme().muted_foreground;
+    let controller = match details {
+        Some(details) => details.controller.clone(),
+        None => pod
+            .owner
+            .as_ref()
+            .map(|owner| ObjectLink::new(&owner.kind, &pod.namespace, &owner.name)),
+    }?;
+    let workload = details.and_then(|details| details.workload.clone());
+    let owner = match workload {
+        Some(Ok(workload)) => v_flex()
+            .items_start()
+            .child(object_link(&workload, workload.label()))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("via")
+                    .child(object_link(&controller, controller.label())),
+            ),
+        Some(Err(reason)) => v_flex()
+            .items_start()
+            .child(object_link(&controller, controller.label()))
+            .child(div().text_xs().text_color(muted).child(format!(
+                "Can't read the {} to find its Deployment. {reason}",
+                controller.kind
+            ))),
+        None => v_flex()
+            .items_start()
+            .child(object_link(&controller, controller.label())),
+    };
+    Some(owner)
+}
+
+/// An object another names, as a link to it in the view for its kind, or as plain text
+/// while its kind has no view. Following it works from the keyboard too, with `Tab` and
+/// `Enter`.
+pub fn object_link(link: &ObjectLink, text: impl Into<SharedString>) -> AnyElement {
+    let text = text.into();
+    if View::for_kind(&link.kind).is_none() {
+        return div()
+            .id(SharedString::from(format!("text {}", link.label())))
+            .test_support()
+            .aria_label(text.clone())
+            .min_w_0()
+            .truncate()
+            .child(text)
+            .into_any_element();
+    }
+    let target = link.clone();
+    Button::new(SharedString::from(format!("link {}", link.label())))
+        .link()
+        .small()
+        .compact()
+        .label(text)
+        .accessibility_label(format!("Go to {}", link.label()))
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(
+                Box::new(OpenLink {
+                    link: target.clone(),
+                }),
+                cx,
+            );
+        })
+        .into_any_element()
 }
 
 pub fn field(label: &'static str, value: Div, cx: &App) -> Div {

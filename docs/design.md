@@ -71,6 +71,17 @@ Every resource view shows the same table, so what follows holds for each of them
 - If the object is deleted, what was read stays visible with **This pod no longer exists. Showing what was last read.**, naming its kind.
 - A role that can read an object but not events still sees the Summary and YAML, and the Events tab says why it is empty.
 
+### Links between objects
+
+- The Summary names related objects as links: a pod's owner and its Node. A pod owned by a ReplicaSet links to the ReplicaSet's Deployment, as **Tail its workload** follows it, and still names the ReplicaSet beneath it: **deployment/checkout-api**, *via replicaset/checkout-api-7f9c6d*. A workload's link back to its pods is **Show its pods**.
+- A link names a kind, a namespace and a name. Following it opens the view for that kind and selects the object, with its details open. If another namespace is chosen, the view moves to the object's namespace, and a filter that hides the object clears, as choosing a pod in the palette does.
+- A kind with no view yet, such as a ReplicaSet, shows as plain text. It becomes a link once a view for its kind is registered.
+- If the API refuses to list the kind across all namespaces, the view moves to the object's namespace. If it refuses that too, the view shows its **No permission** state.
+- If a pod's ReplicaSet cannot be read, the owner shows the ReplicaSet and says why its Deployment is unknown, with the API's reason.
+- Links are buttons with the link role. `Tab` reaches them, `Enter` follows them, and a screen reader reads **Go to deployment/checkout-api**. `Tab` leaves the table rather than moving between its cells.
+- After following a link, or **Show its pods**, a **Back** arrow sits before the view name in the panel header, labelled with where it returns to, such as **Back to pod checkout-api-7f9c6d-h7vcd**. It, `⌘[` / `Alt+←`, or **Back to …** in the palette returns to that view with its namespace, filter, selector and selection. Each step back goes one link further back.
+- `Esc` keeps its meaning, closing the details panel, so it never navigates. Choosing a view yourself, from the sidebar, a digit or the palette, or choosing a pod in the palette, starts over, and **Back** goes away.
+
 ## Log explorer
 
 - Each line shows time, source, severity and text. Long lines clip by default, and **Wrap lines** wraps them.
@@ -140,6 +151,8 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `l` | Tail logs for the selection |
 | `w` | Tail the selected pod's workload, or the selected workload's pods |
 | `p` | Show the selected workload's pods |
+| `⌘[` / `Alt+←` | Go back after following a link or **Show its pods** |
+| `Tab` / `Shift+Tab` | Move to the next or previous control, out of the table and into the details panel's links |
 | `s` | Show the summary |
 | `y` | Show YAML |
 | `e` | Show events |

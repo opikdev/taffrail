@@ -937,6 +937,36 @@ pub fn run(directory: PathBuf) {
         table.settle();
         table.save(&directory, &format!("deployment-details-{suffix}.png"));
 
+        let mut links = connected(&deployments, mode);
+        links.set_namespace("payments");
+        let root = links.root.clone();
+        links
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        links.wait_until(|window, _| {
+            window
+                .try_find_by_label("Go to deployment/checkout-api")
+                .is_some()
+        });
+        links.settle();
+        links.save(&directory, &format!("owner-links-{suffix}.png"));
+        let handle = links.handle;
+        links
+            .cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("link deployment/checkout-api", cx);
+            })
+            .expect("preview window closed");
+        links.wait_until(|window, _| {
+            window.try_find("go-back").is_some()
+                && window
+                    .try_find("details-title")
+                    .is_some_and(|title| title.label() == Some("checkout-api"))
+        });
+        links.settle();
+        links.save(&directory, &format!("owner-link-followed-{suffix}.png"));
+
         let mut forbidden = connected(&refused, mode);
         forbidden.show_view(View::Deployments);
         forbidden.wait_until(|window, _| window.try_find("notice-action").is_some());

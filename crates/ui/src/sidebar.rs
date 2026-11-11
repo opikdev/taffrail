@@ -47,6 +47,14 @@ const GROUPS: [(&str, &[(&str, IconName)]); 4] = [
     ),
 ];
 
+/// Every resource the sidebar lists, in order, whether or not it has a view yet.
+#[cfg(test)]
+pub fn sidebar_names() -> impl Iterator<Item = &'static str> {
+    GROUPS
+        .into_iter()
+        .flat_map(|(_, resources)| resources.iter().map(|(name, _)| *name))
+}
+
 /// What the sidebar shows for one view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SidebarItem {

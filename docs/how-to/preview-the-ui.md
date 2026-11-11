@@ -38,6 +38,8 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `columns-hidden-dark.png`, `columns-menu-dark.png` | The pod table with columns hidden, and the **Columns** menu open |
 | `narrow-dark.png`, `narrow-columns-menu-dark.png` | The panel header at the 760 px minimum width, and its **Columns** menu open |
 | `deployments-dark.png`, `deployments-light.png` | The Deployments table, with stalled, unavailable and progressing rollouts first |
+| `owner-links-dark.png`, `owner-links-light.png` | A pod's Summary, linking to its Deployment via its ReplicaSet, with its Node as plain text until Nodes have a view |
+| `owner-link-followed-dark.png`, `owner-link-followed-light.png` | The Deployment after following that link, with **Back** in the panel header |
 | `deployment-details-dark.png`, `deployment-details-light.png` | A stalled Deployment's details |
 | `no-permission-dark.png`, `no-permission-light.png` | The Deployments view when the API refuses to list Deployments, with the lock in the sidebar |
 | `failed-dark.png` | A cluster that can't be reached |

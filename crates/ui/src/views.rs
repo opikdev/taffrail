@@ -63,7 +63,42 @@ impl View {
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|view| view.name() == name)
     }
+
+    /// The Kubernetes kind the view lists, such as `Deployment`.
+    pub fn kind(self) -> &'static str {
+        KIND_NAMES
+            .iter()
+            .find(|(_, name)| *name == self.name())
+            .map_or(self.name(), |(kind, _)| kind)
+    }
+
+    /// The view that lists objects of a Kubernetes kind, such as `Deployment`, once one is
+    /// registered. Links to a kind without a view show as plain text.
+    pub fn for_kind(kind: &str) -> Option<Self> {
+        KIND_NAMES
+            .iter()
+            .find(|(known, _)| *known == kind)
+            .and_then(|(_, name)| Self::from_name(name))
+    }
 }
+
+/// Each kind the sidebar can list, and the name of its view. A view registered under one of
+/// these names opens links to its kind.
+const KIND_NAMES: [(&str, &str); 13] = [
+    ("Pod", "Pods"),
+    ("Deployment", "Deployments"),
+    ("StatefulSet", "StatefulSets"),
+    ("DaemonSet", "DaemonSets"),
+    ("Job", "Jobs"),
+    ("CronJob", "CronJobs"),
+    ("Service", "Services"),
+    ("Ingress", "Ingresses"),
+    ("ConfigMap", "ConfigMaps"),
+    ("Secret", "Secrets"),
+    ("Node", "Nodes"),
+    ("Namespace", "Namespaces"),
+    ("Event", "Events"),
+];
 
 /// Creates the panel behind a view other than Pods, which the root keeps apart.
 pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box<dyn Panel> {
@@ -91,6 +126,8 @@ pub trait Panel {
     /// What to say when no rows show, though the watch has listed.
     fn empty_notice(&self, cx: &App) -> Notice;
     fn table(&self) -> AnyElement;
+    /// Whether keyboard focus is on the table.
+    fn table_focused(&self, window: &Window, cx: &App) -> bool;
 
     fn set_filter(&self, filter: String, cx: &mut App);
     fn set_selector(&self, selector: Option<SelectorFilter>, cx: &mut App);
@@ -106,6 +143,10 @@ pub trait Panel {
     fn move_selection(&self, delta: isize, cx: &mut App) -> bool;
     /// Selects an object and scrolls to it. Returns whether its row shows.
     fn select(&self, key: ObjectKey, cx: &mut App) -> bool;
+    /// Whether the watch has listed this object, whether or not its row shows.
+    fn contains(&self, key: &ObjectKey, cx: &App) -> bool;
+    /// The selected object, even while filters hide it.
+    fn selected_key(&self, cx: &App) -> Option<ObjectKey>;
     fn has_selection(&self, cx: &App) -> bool;
     /// The pods a tail of the selected object follows, for a workload.
     fn selected_follow(&self, cx: &App) -> Option<Follow>;
@@ -227,6 +268,10 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
             .into_any_element()
     }
 
+    fn table_focused(&self, window: &Window, cx: &App) -> bool {
+        self.table.focus_handle(cx).is_focused(window)
+    }
+
     fn set_filter(&self, filter: String, cx: &mut App) {
         self.update_table(cx, |table| table.set_filter(filter));
     }
@@ -286,6 +331,19 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
         });
         self.scroll_to_selection(cx);
         shown
+    }
+
+    fn contains(&self, key: &ObjectKey, cx: &App) -> bool {
+        self.table
+            .read(cx)
+            .delegate()
+            .snapshot()
+            .find(key)
+            .is_some()
+    }
+
+    fn selected_key(&self, cx: &App) -> Option<ObjectKey> {
+        self.table.read(cx).delegate().selected().cloned()
     }
 
     fn has_selection(&self, cx: &App) -> bool {
@@ -393,7 +451,8 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::View;
+    use super::{KIND_NAMES, View};
+    use crate::sidebar::sidebar_names;
 
     #[test]
     fn each_view_has_its_own_name_and_key() {
@@ -408,5 +467,34 @@ mod tests {
         for view in View::ALL {
             assert_eq!(View::from_name(view.name()), Some(view));
         }
+    }
+
+    #[test]
+    fn every_view_opens_links_to_its_kind() {
+        for view in View::ALL {
+            let kind = KIND_NAMES
+                .iter()
+                .find(|(_, name)| *name == view.name())
+                .map(|(kind, _)| *kind);
+            assert_eq!(kind, Some(view.kind()), "{} has no kind", view.name());
+            assert_eq!(View::for_kind(view.kind()), Some(view));
+        }
+    }
+
+    #[test]
+    fn a_kind_without_a_view_opens_nothing() {
+        assert_eq!(View::for_kind("ReplicaSet"), None);
+        for (kind, name) in KIND_NAMES {
+            assert_eq!(
+                View::for_kind(kind).is_some(),
+                View::from_name(name).is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn every_sidebar_item_has_a_kind() {
+        let names: Vec<_> = KIND_NAMES.iter().map(|(_, name)| *name).collect();
+        assert_eq!(names, sidebar_names().collect::<Vec<_>>());
     }
 }

@@ -7,6 +7,7 @@ mod environment;
 #[cfg(test)]
 mod fake_api;
 mod follow;
+mod links;
 mod logs;
 mod pods;
 mod selector;
@@ -18,6 +19,7 @@ pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
 pub use details::{ContainerDetails, ObjectDetails, ObjectEvent, PodDetails};
 pub use environment::use_login_shell_environment;
 pub use follow::Follow;
+pub use links::ObjectLink;
 pub use logs::{
     Bucket, CONTEXT_SEPARATOR, ContextBlock, ContextLine, ExportProgress, FilterError,
     FilterProgress, FilterUpdates, Following, Gap, JsonLine, Level, LevelCounts, LogExport,

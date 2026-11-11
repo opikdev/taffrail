@@ -16,7 +16,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
     Backend, ClusterError, Connection, Contexts, Follow, LogFilter, LogTail, LogTarget,
-    MAX_TAIL_PODS, PodKey, PodRow, PodSnapshot, SavedState, Selector, WatchError,
+    MAX_TAIL_PODS, ObjectKey, ObjectLink, PodKey, PodRow, PodSnapshot, SavedState, Selector,
+    WatchError,
 };
 
 use crate::about::render_about;
@@ -28,11 +29,11 @@ use crate::logs::{
     chosen_severity, dock_height,
 };
 use crate::palette::{
-    ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, NextError,
-    OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts,
-    ShowAbout, ShowEvents, ShowPods, ShowShortcuts, ShowSummary, ShowView, ShowYaml, SwitchContext,
-    SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar,
-    groups, render_shortcuts,
+    ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, GoBack,
+    NextError, OpenLink, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
+    PreviousError, ReloadContexts, ShowAbout, ShowEvents, ShowPods, ShowShortcuts, ShowSummary,
+    ShowView, ShowYaml, SwitchContext, SwitchNamespace, TailSelection, TailSelector, TailWorkload,
+    ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::sidebar::{SidebarItem, resource_sidebar};
 use crate::table::{ALL_NAMESPACES, ResourceTable, SelectorFilter, TableRow};
@@ -64,6 +65,8 @@ struct ToggleColumn {
 const KEY_CONTEXT: &str = "Taffrail";
 const TABLE_KEYS: &str = "Taffrail && !Input";
 const FILTER_CONTEXT: &str = "PodFilter";
+/// The key context of GPUI Kit's table.
+const TABLE_CONTEXT: &str = "DataTable";
 const OPEN_PALETTE_KEY: &str = if cfg!(target_os = "macos") {
     "cmd-k"
 } else {
@@ -78,6 +81,11 @@ const COPY_KEY: &str = if cfg!(target_os = "macos") {
     "cmd-c"
 } else {
     "ctrl-c"
+};
+const BACK_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-["
+} else {
+    "alt-left"
 };
 const CLOSE_WINDOW_KEY: &str = if cfg!(target_os = "macos") {
     "cmd-w"
@@ -105,6 +113,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("l", TailSelection, Some(TABLE_KEYS)),
         KeyBinding::new("w", TailWorkload, Some(TABLE_KEYS)),
         KeyBinding::new("p", ShowPods, Some(TABLE_KEYS)),
+        KeyBinding::new(BACK_KEY, GoBack, Some(TABLE_KEYS)),
         KeyBinding::new("s", ShowSummary, Some(TABLE_KEYS)),
         KeyBinding::new("e", ShowEvents, Some(TABLE_KEYS)),
         KeyBinding::new("y", ShowYaml, Some(TABLE_KEYS)),
@@ -130,6 +139,28 @@ pub fn init(cx: &mut App) {
     cx.bind_keys(
         View::ALL.map(|view| KeyBinding::new(view.key(), ShowView { view }, Some(TABLE_KEYS))),
     );
+    // GPUI Kit's table takes `Tab` to move between cells, which keeps focus in it. Rows are
+    // chosen whole here, so `Tab` and `Shift+Tab` leave the table for the next control,
+    // such as a link in the details panel.
+    cx.intercept_keystrokes(|event, window, cx| {
+        let key = &event.keystroke;
+        let modifiers = key.modifiers;
+        let in_table = event
+            .context_stack
+            .iter()
+            .any(|context| context.contains(TABLE_CONTEXT));
+        if key.key != "tab" || !in_table || modifiers.control || modifiers.alt || modifiers.platform
+        {
+            return;
+        }
+        if modifiers.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        cx.stop_propagation();
+    })
+    .detach();
 }
 
 const TITLE_BAR_HEIGHT: f32 = 40.;
@@ -145,6 +176,8 @@ const NAMESPACE_PICKER_WIDTH: f32 = 148.;
 const NAMESPACE_MENU_WIDTH: f32 = 240.;
 const NOTICE_WIDTH: f32 = 420.;
 const CONNECTION_DOT: f32 = 7.;
+/// How many places **Back** remembers.
+const MAX_HISTORY: usize = 50;
 
 /// Window chrome with the traffic lights centred in the title bar.
 pub fn titlebar_options() -> TitlebarOptions {
@@ -187,6 +220,27 @@ pub(crate) enum NoticeAction {
     ClearFilter,
     ShowAllNamespaces,
     ShowContextNamespace,
+}
+
+/// Where the user was before following a link, for **Back** to return to.
+#[derive(Clone)]
+struct Place {
+    view: View,
+    selected: Option<ObjectKey>,
+    namespace: Option<String>,
+    filter: String,
+    selector: Option<SelectorFilter>,
+    /// What **Back** names, such as `pod api-1`.
+    label: String,
+}
+
+/// An object to select once its view has listed it.
+#[derive(Clone)]
+struct Pending {
+    view: View,
+    key: ObjectKey,
+    /// Whether to clear the filter if it hides the object, as following a link does.
+    reveal: bool,
 }
 
 pub(crate) struct Notice {
@@ -236,6 +290,9 @@ pub struct Root {
     /// Says what the log dock is waiting for, or why a tail could not start.
     log_note: Option<SharedString>,
     workload_task: Option<Task<()>>,
+    /// The places links were followed from, newest last.
+    history: Vec<Place>,
+    pending: Option<Pending>,
     palette: Option<Entity<CommandState>>,
     sheet: Option<Sheet>,
     focus_handle: FocusHandle,
@@ -331,6 +388,8 @@ impl Root {
             log_controls,
             log_note: None,
             workload_task: None,
+            history: Vec::new(),
+            pending: None,
             palette: None,
             sheet: None,
             focus_handle,
@@ -449,6 +508,13 @@ impl Root {
             self.update_namespace_options(window, cx);
         }
         self.panel_for(view).update_details(cx);
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.view == view)
+        {
+            self.select_pending(window, cx);
+        }
         cx.notify();
     }
 
@@ -537,6 +603,8 @@ impl Root {
         self.logs = None;
         self.log_note = None;
         self.workload_task = None;
+        self.history.clear();
+        self.pending = None;
         self.close_details(cx);
         self.pods.stop(cx);
         for panel in &mut self.panels {
@@ -764,6 +832,8 @@ impl Root {
 
     fn open_pod(&mut self, key: PodKey, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
+        self.history.clear();
+        self.pending = None;
         self.show_view(View::Pods, window, cx);
         if !self.pods.select(key.clone(), cx) {
             self.clear_filter(window, cx);
@@ -779,6 +849,7 @@ impl Root {
         let Some(follow) = self.panel().selected_follow(cx) else {
             return;
         };
+        self.push_history(cx);
         self.filter
             .update(cx, |filter, cx| filter.set_value("", window, cx));
         self.show_view(View::Pods, window, cx);
@@ -792,6 +863,123 @@ impl Root {
         self.set_namespace(follow.namespace, window, cx);
         self.remember_state(window, cx);
         cx.notify();
+    }
+
+    /// Where the user is now, for **Back** to return to.
+    fn here(&self, cx: &App) -> Place {
+        let selected = self.panel().selected_key(cx);
+        let label = match &selected {
+            Some((_, name)) => format!("{} {name}", self.view.kind().to_lowercase()),
+            None => self.view.name().to_owned(),
+        };
+        Place {
+            view: self.view,
+            selected,
+            namespace: self.namespace(cx),
+            filter: self.filter.read(cx).value().to_string(),
+            selector: self.panel().selector(cx),
+            label,
+        }
+    }
+
+    fn push_history(&mut self, cx: &App) {
+        let place = self.here(cx);
+        self.history.push(place);
+        if self.history.len() > MAX_HISTORY {
+            self.history.remove(0);
+        }
+    }
+
+    /// Opens the view for a linked object's kind and selects the object. A namespaced
+    /// object in another namespace than the chosen one switches to its namespace, and a
+    /// filter that hides it clears. A kind without a view does nothing.
+    fn open_link(&mut self, link: ObjectLink, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = View::for_kind(&link.kind) else {
+            return;
+        };
+        self.close_overlays(window, cx);
+        self.push_history(cx);
+        let chosen = self.namespace(cx);
+        if !link.namespace.is_empty() && chosen.is_some_and(|chosen| chosen != link.namespace) {
+            self.set_namespace(Some(link.namespace.clone()), window, cx);
+        }
+        self.show_view(view, window, cx);
+        self.pending = Some(Pending {
+            view,
+            key: link.key(),
+            reveal: true,
+        });
+        self.select_pending(window, cx);
+        self.remember_state(window, cx);
+    }
+
+    /// Returns to where the last link was followed from, with its view, namespace, filter
+    /// and selection.
+    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = self.history.pop() else {
+            return;
+        };
+        self.close_overlays(window, cx);
+        self.pending = None;
+        self.filter
+            .update(cx, |filter, cx| filter.set_value(place.filter, window, cx));
+        self.set_namespace(place.namespace, window, cx);
+        self.show_view(place.view, window, cx);
+        self.panel().set_selector(place.selector, cx);
+        match place.selected {
+            Some(key) => {
+                self.pending = Some(Pending {
+                    view: place.view,
+                    key,
+                    reveal: false,
+                });
+                self.select_pending(window, cx);
+            }
+            None => self.close_details(cx),
+        }
+        self.remember_state(window, cx);
+        cx.notify();
+    }
+
+    /// Selects the object a link or **Back** asked for, once its view has listed it. If the
+    /// API refuses the list across all namespaces, the view moves to the object's namespace
+    /// first. If it refuses that too, the view shows its **No permission** state.
+    fn select_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.clone() else {
+            return;
+        };
+        if pending.view != self.view {
+            self.pending = None;
+            return;
+        }
+        let status = self.panel().status(cx);
+        let namespace = &pending.key.0;
+        match &status.error {
+            Some(WatchError::Forbidden {
+                namespace: None, ..
+            }) if !namespace.is_empty() => {
+                if self.namespace(cx).as_ref() != Some(namespace) {
+                    self.set_namespace(Some(namespace.clone()), window, cx);
+                    self.remember_state(window, cx);
+                }
+                return;
+            }
+            Some(_) if !status.synced => {
+                self.pending = None;
+                return;
+            }
+            _ if !status.synced => return,
+            _ => {}
+        }
+        self.pending = None;
+        if !self.panel().contains(&pending.key, cx) {
+            return;
+        }
+        if !self.panel().select(pending.key.clone(), cx) && pending.reveal {
+            self.clear_filter(window, cx);
+            self.panel().select(pending.key, cx);
+        }
+        self.open_details(cx);
     }
 
     fn selected_context(&self, cx: &App) -> Option<String> {
@@ -1283,6 +1471,7 @@ impl Root {
             has_selection: self.panel().details().is_some(),
             has_tail: self.logs.is_some(),
             connected: self.connection.is_some(),
+            back: self.history.last().map(|place| place.label.clone()),
         }
     }
 
@@ -1352,6 +1541,10 @@ impl Root {
             ("Tail its pods".into(), workload)
         };
         let selector = self.panel().selector(cx);
+        let back = self
+            .history
+            .last()
+            .map(|place| format!("Back to {}", place.label));
         let muted = cx.theme().muted_foreground;
         h_flex()
             .h(px(PANEL_HEADER_HEIGHT))
@@ -1362,6 +1555,17 @@ impl Root {
             .border_b_1()
             .border_color(cx.theme().border)
             .text_sm()
+            .when_some(back, |header, back| {
+                header.child(
+                    Button::new("go-back")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::ArrowLeft))
+                        .accessibility_label(back.clone())
+                        .tooltip(back)
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoBack), cx)),
+                )
+            })
             .when(!compact, |header| {
                 header
                     .child(div().text_color(muted).child(view.group()))
@@ -1744,7 +1948,14 @@ impl Render for Root {
                     this.log_controls.query.focus_handle(cx).focus(window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| this.open_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
+                // A focused button or link takes `Enter` itself.
+                if this.focus_handle.is_focused(window) || this.panel().table_focused(window, cx) {
+                    this.open_selected(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(window, cx);
             }))
@@ -1836,8 +2047,16 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &OpenPod, window, cx| {
                 this.open_pod(action.key.clone(), window, cx);
             }))
+            .on_action(cx.listener(|this, action: &OpenLink, window, cx| {
+                this.open_link(action.link.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| {
+                this.go_back(window, cx);
+            }))
             .on_action(cx.listener(|this, action: &ShowView, window, cx| {
                 this.close_overlays(window, cx);
+                this.history.clear();
+                this.pending = None;
                 this.show_view(action.view, window, cx);
                 this.remember_state(window, cx);
             }))
@@ -1930,7 +2149,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice, pod_status, tail_label};
+    use super::{
+        BACK_KEY, OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice, pod_status, tail_label,
+    };
     use crate::fake_api::{Fixture, kubeconfig, serve};
     use crate::logs::gap_text;
     use crate::pods::PodTable;
@@ -3890,6 +4111,205 @@ users:
             assert_eq!(state.view.as_deref(), Some("Deployments"));
             assert_eq!(state.view_columns["Deployments"], ["Age"]);
             assert_eq!(state.hidden_columns, ["Node"]);
+        })
+        .unwrap();
+    }
+    const OWNED_POD_BODY: &str = r#"{"kind":"Pod","apiVersion":"v1","metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1","ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"api-7f9c","uid":"r","controller":true}]},"spec":{"nodeName":"node-1","containers":[{"name":"app","image":"api:1"}]},"status":{"phase":"Running"}}"#;
+    const SHOP_DEPLOYMENTS: &str = "/apis/apps/v1/namespaces/shop/deployments";
+
+    /// The `api` Deployment, its ReplicaSet and a pod they own. `forbidden` lists paths the
+    /// API refuses.
+    async fn open_links(
+        forbidden: Vec<&'static str>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let server = serve(Fixture {
+            pod_list: OWNED_POD_LIST_BODY.into(),
+            pod: OWNED_POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![
+                (DEPLOYMENTS.into(), DEPLOYMENT_LIST_BODY.into()),
+                (SHOP_DEPLOYMENTS.into(), DEPLOYMENT_LIST_BODY.into()),
+                (
+                    "/apis/apps/v1/namespaces/shop/deployments/api".into(),
+                    DEPLOYMENT_BODY.into(),
+                ),
+                (
+                    "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c".into(),
+                    REPLICA_SET_BODY.into(),
+                ),
+            ],
+        });
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+        press(handle, "j", cx);
+        wait_for_label(handle, "Go to deployment/api", cx).await;
+        (handle, root)
+    }
+
+    async fn wait_for_details(handle: AnyWindowHandle, name: &str, cx: &mut TestAppContext) {
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window
+                .try_find("details-title")
+                .is_some_and(|title| title.label() == Some(name))
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_pod_links_to_its_deployment_and_back(cx: &mut TestAppContext) {
+        let (handle, root) = open_links(Vec::new(), cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let link = window.find_by_label("Go to deployment/api");
+            assert_eq!(link.role(), Some(gpui_kit::Role::Link));
+            assert!(
+                window
+                    .try_find_by_label("Go to replicaset/api-7f9c")
+                    .is_none()
+            );
+            assert!(!window.find_all_by_label("replicaset/api-7f9c").is_empty());
+            window.click("link deployment/api", cx);
+        })
+        .unwrap();
+
+        wait_for_label(handle, "Filter deployments", cx).await;
+        wait_for_details(handle, "api", cx).await;
+        root.read_with(cx, |root, _| assert_eq!(root.view, View::Deployments));
+
+        press(handle, BACK_KEY, cx);
+        wait_for_details(handle, "api-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find_all_by_label("Filter pods").len(), 1);
+            assert!(window.try_find("go-back").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_link_follows_from_the_keyboard(cx: &mut TestAppContext) {
+        let (handle, _) = open_links(Vec::new(), cx).await;
+
+        let mut focused = false;
+        for _ in 0..40 {
+            press(handle, "tab", cx);
+            focused = cx
+                .update_window(handle, |_, window, _| {
+                    window.find_by_label("Go to deployment/api").focused() == Some(true)
+                })
+                .unwrap();
+            if focused {
+                break;
+            }
+        }
+        assert!(focused, "Tab never reached the link");
+        press(handle, "enter", cx);
+
+        wait_for_details(handle, "api", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("go-back").label(), Some("Back to pod api-1"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_kind_without_a_view_shows_as_text_until_it_has_one(cx: &mut TestAppContext) {
+        let (handle, _) = open_links(Vec::new(), cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let node_link = window.try_find_by_label("Go to node/node-1");
+            match View::for_kind("Node") {
+                Some(_) => assert!(node_link.is_some()),
+                None => {
+                    assert!(node_link.is_none());
+                    assert!(window.try_find("text node/node-1").is_some());
+                }
+            }
+            let set_link = window.try_find_by_label("Go to replicaset/api-7f9c");
+            assert_eq!(set_link.is_some(), View::for_kind("ReplicaSet").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_link_to_a_refused_kind_shows_no_permission(cx: &mut TestAppContext) {
+        let (handle, root) = open_links(vec![DEPLOYMENTS, SHOP_DEPLOYMENTS], cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("link deployment/api", cx);
+        })
+        .unwrap();
+
+        wait_for_notice(handle, "You can't list Deployments in shop", cx).await;
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.view, View::Deployments);
+            assert_eq!(root.namespace(cx).as_deref(), Some("shop"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_link_switches_namespace_and_back_restores_it(cx: &mut TestAppContext) {
+        let (handle, root) = open_links(Vec::new(), cx).await;
+        set_namespace(handle, &root, "web", cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("link deployment/api", cx);
+        })
+        .unwrap();
+
+        wait_for_details(handle, "api", cx).await;
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx).as_deref(), Some("shop"));
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("go-back", cx);
+        })
+        .unwrap();
+        wait_for_details(handle, "api-1", cx).await;
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.view, View::Pods);
+            assert_eq!(root.namespace(cx).as_deref(), Some("web"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn back_returns_from_a_workloads_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_deployments(Vec::new(), cx).await;
+        press(handle, "2", cx);
+        wait_for_label(handle, "api", cx).await;
+        press(handle, "j", cx);
+        press(handle, "p", cx);
+        wait_for_label(handle, "Back to deployment api", cx).await;
+
+        press(handle, BACK_KEY, cx);
+        wait_for_details(handle, "api", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find_all_by_label("Filter deployments").len(), 1);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn choosing_a_view_forgets_where_back_went(cx: &mut TestAppContext) {
+        let (handle, _) = open_links(Vec::new(), cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("link deployment/api", cx);
+        })
+        .unwrap();
+        wait_for_details(handle, "api", cx).await;
+
+        press(handle, "1", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("go-back").is_none());
         })
         .unwrap();
     }
