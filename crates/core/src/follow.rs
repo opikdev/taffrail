@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use crate::cluster::ClusterError;
 use crate::logs::{LogTarget, MAX_TAIL_PODS};
 use crate::pods::{PodKey, PodRow, PodSnapshot};
+use crate::reason::reason;
 use crate::selector::Selector;
 use crate::watch::Row;
 
@@ -123,7 +124,7 @@ where
         .await
         .map_err(|error| ClusterError::ReadWorkload {
             workload: workload_label(&K::kind(&()), name),
-            error: error.to_string(),
+            error: reason(&error),
         })
 }
 
@@ -144,9 +145,9 @@ fn follow_workload(
 ) -> Result<Follow, ClusterError> {
     let label = workload_label(kind, name);
     let selector = selector
-        .ok_or_else(|| "it has no selector".to_owned())
+        .ok_or_else(|| "It has no selector".to_owned())
         .and_then(Selector::from_label_selector)
-        .map_err(|error| ClusterError::ReadWorkload {
+        .map_err(|error| ClusterError::FollowWorkload {
             workload: label.clone(),
             error,
         })?;
@@ -213,7 +214,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::fake_api::{self, Route};
+    use crate::fake_api::{self, Reply, Request, Route};
     use crate::pods::Owner;
 
     fn pod(namespace: &str, name: &str, app: &str, created: i64) -> Arc<PodRow> {
@@ -428,6 +429,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_workload_says_the_apis_reason_and_what_to_do() {
+        let connection = fake_api::connect_with(std::sync::Arc::new(|request: &Request| {
+            (request.path == "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c").then_some(
+                Reply::Forbidden(
+                    r#"replicasets.apps \"api-7f9c\" is forbidden: User \"jane\" cannot get resource \"replicasets\""#,
+                ),
+            )
+        }))
+        .await;
+
+        let error = resolve(connection.client, owned_by("ReplicaSet", "api-7f9c"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            r#"Can't read replicaset/api-7f9c to find its pods. Press l to tail this pod alone. The API says: replicasets.apps "api-7f9c" is forbidden: User "jane" cannot get resource "replicasets""#
+        );
+    }
+
+    #[tokio::test]
     async fn a_workload_that_cannot_be_read_says_which() {
         let error = resolve_with(Vec::new(), owned_by("DaemonSet", "agent"))
             .await
@@ -435,7 +457,7 @@ mod tests {
 
         let message = error.to_string();
         assert!(
-            message.starts_with("Failed to read daemonset/agent: "),
+            message.starts_with("Can't read daemonset/agent to find its pods. "),
             "{message}"
         );
     }

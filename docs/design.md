@@ -44,6 +44,7 @@ Every resource view shows the same table, so what follows holds for each of them
 - Rows that need attention lead by default: failed, then degraded, then healthy, then finished.
 - The namespace picker sits left of the filter and lists the namespaces that hold pods or objects of the current view, with a search field. The picker and the filter are shared by every view. Both narrow the rows on the client, over one watch of each kind across all namespaces, so on the Pods view they narrow what a tail follows too.
 - If the API refuses a list across all namespaces, as it does for a role bound in one namespace, that kind's watch moves to the chosen namespace, and moves again when the choice changes. Other kinds keep their own watches.
+- If the API refuses the first pod list across all namespaces after a window connects, and the context names a namespace, the window chooses that namespace for every view, once per connection. A muted line above the table says so: **Showing team-a, the namespace your context names, because you can't list pods across all namespaces.** It stays until you choose a namespace or another context. The picker keeps working, and choosing **All namespaces** shows the **No permission** state. This choice is not saved, so the window opens on all namespaces again next time and a context that may list them stays there. Pods decide it, because every window watches them. A refused list of another kind leaves the namespace alone.
 - Pods are watched for as long as a context is connected, because the palette, the sidebar count and log tails use them. Other kinds are watched only while their view is open, and stop when you leave it.
 - A chosen namespace stays chosen if it disappears, and the table shows the **No rows** state until it returns.
 - Filters hide rows but keep the selection, so the details panel stays open on a pod the filter hides.
@@ -191,6 +192,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Invalid filter | **/(timeout/ is not a valid regular expression**, in `error` in place of the count. |
 | Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |
 | No workload | **debug-shell has no workload to follow.** Shown in the log dock, which keeps any running tail. |
+| Workload refused | **Can't read replicaset/api-7f9c to find its pods. Press l to tail this pod alone. The API says:** and the API's reason. Shown in the log dock, which keeps any running tail. |
 | Log storage full | **Oldest lines removed to stay under 1 GiB.** Shown once, in the log dock. |
 | Secret hidden | `••••••••` with **Reveal value**. Values hide again when you leave the object. |
 
@@ -201,6 +203,7 @@ On macOS and Linux, an app opened from the Dock, Finder or a desktop launcher mi
 - Use one term per concept: **context**, not cluster profile; **tail**, not stream; **filter** hides lines, and **search** only highlights them.
 - Buttons name the action: **Tail 12 pods**, **Reveal value**, **Reload contexts**.
 - Errors say what happened, why if known, and what to do next.
+- When the API refuses or fails a request, show its own message after a lead-in that says what failed, such as **Can't list events for this pod**. Never show the client's debug output. Errors that never reach the API, such as a refused connection, show their causes in plain words.
 
 ## Colour
 

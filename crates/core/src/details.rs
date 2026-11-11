@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use crate::cluster::ClusterError;
 use crate::follow::controller;
 use crate::links::ObjectLink;
+use crate::reason::reason;
 
 const MAX_EVENTS: usize = 100;
 
@@ -206,7 +207,7 @@ impl ObjectDetails for PodDetails {
             Ok(read) => controller(&read.metadata)
                 .filter(|(kind, _)| *kind == "Deployment")
                 .map(|(kind, name)| Ok(ObjectLink::new(kind, set.namespace.clone(), name))),
-            Err(error) => Some(Err(api_reason(&error))),
+            Err(error) => Some(Err(reason(&error))),
         };
         self
     }
@@ -234,25 +235,16 @@ pub(crate) async fn load<D: ObjectDetails>(
     let object = D::api(client.clone(), &namespace)
         .get(&name)
         .await
-        .map_err(|error| failed(error.to_string()))?;
+        .map_err(|error| failed(reason(&error)))?;
     let selector = format!("involvedObject.kind={kind},involvedObject.name={name}");
     let client_for_resolve = client.clone();
     let events = Api::<Event>::namespaced(client, &namespace)
         .list(&ListParams::default().fields(&selector))
         .await
         .map(|events| newest_events(events.items))
-        .map_err(|error| error.to_string());
+        .map_err(|error| reason(&error));
     let details = D::read(object, events).map_err(failed)?;
     Ok(details.resolve(client_for_resolve).await)
-}
-
-/// The API's own reason for a failed request, such as an RBAC refusal, without the
-/// client's wrapping.
-pub(crate) fn api_reason(error: &kube::Error) -> String {
-    match error {
-        kube::Error::Api(status) if !status.message.is_empty() => status.message.clone(),
-        error => error.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -427,6 +419,44 @@ mod tests {
         assert!(reason.starts_with("replicasets.apps"), "{reason}");
         assert!(reason.contains("cannot get resource"), "{reason}");
         assert_eq!(details.containers.len(), 1);
+    }
+
+    const EVENTS_REFUSED: &str = r#"events is forbidden: User \"jane\" cannot list resource \"events\" in API group \"\" in the namespace \"shop\""#;
+
+    #[tokio::test]
+    async fn refused_events_say_the_apis_reason_alone() {
+        let details = load_pod(Arc::new(|request: &Request| match request.path.as_str() {
+            POD_PATH => Some(Reply::Json(OWNED_POD.into())),
+            SET_PATH => Some(Reply::Json(REPLICA_SET.into())),
+            "/api/v1/namespaces/shop/events" => Some(Reply::Forbidden(EVENTS_REFUSED)),
+            _ => None,
+        }))
+        .await;
+
+        assert_eq!(details.events, Err(EVENTS_REFUSED.replace("\\\"", "\"")));
+    }
+
+    #[tokio::test]
+    async fn a_refused_object_says_the_apis_reason_alone() {
+        let connection = fake_api::connect_with(Arc::new(|request: &Request| {
+            (request.path == POD_PATH).then_some(Reply::Forbidden(
+                r#"pods \"api-1\" is forbidden: User \"jane\" cannot get resource \"pods\""#,
+            ))
+        }))
+        .await;
+
+        let error = load::<PodDetails>(connection.client, "shop".into(), "api-1".into())
+            .await
+            .unwrap_err();
+
+        let crate::cluster::ClusterError::ReadObject { object, error } = error else {
+            panic!("expected a read error, got {error:?}");
+        };
+        assert_eq!(object, "pod shop/api-1");
+        assert_eq!(
+            error,
+            r#"pods "api-1" is forbidden: User "jane" cannot get resource "pods""#
+        );
     }
 
     #[tokio::test]

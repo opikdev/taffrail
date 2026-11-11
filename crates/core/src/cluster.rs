@@ -15,6 +15,7 @@ use crate::environment::{self, ShellEnvironment};
 use crate::follow::{self, Follow};
 use crate::logs::{self, LogTail, LogTarget};
 use crate::pods::{PodFeed, PodRow};
+use crate::reason::reason;
 use crate::watch::{self, ResourceWatch, Row};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,7 +30,7 @@ pub enum ClusterError {
         context: String,
         source: KubeconfigError,
     },
-    #[error("Failed to reach context \"{context}\": {source}")]
+    #[error("Failed to reach context \"{context}\": {}", reason(.source))]
     Connect {
         context: String,
         source: kube::Error,
@@ -47,8 +48,12 @@ pub enum ClusterError {
     NoWorkload { pod: String },
     #[error("Following a {workload} is not supported")]
     UnsupportedWorkload { workload: String },
-    #[error("Failed to read {workload}: {error}")]
+    #[error(
+        "Can't read {workload} to find its pods. Press l to tail this pod alone. The API says: {error}"
+    )]
     ReadWorkload { workload: String, error: String },
+    #[error("Can't follow {workload}. {error}")]
+    FollowWorkload { workload: String, error: String },
 }
 
 /// The contexts in the user's kubeconfig.
@@ -138,6 +143,13 @@ impl Contexts {
             context: Some(context.clone()),
             ..KubeConfigOptions::default()
         };
+        let names_namespace = self
+            .kubeconfig
+            .contexts
+            .iter()
+            .find(|named| named.name == context)
+            .and_then(|named| named.context.as_ref()?.namespace.as_ref())
+            .is_some();
         let config = Config::from_custom_kubeconfig(self.kubeconfig, &options)
             .await
             .map_err(|source| ClusterError::LoadContext {
@@ -161,6 +173,7 @@ impl Contexts {
             context,
             server_version: version.git_version,
             namespace,
+            names_namespace,
             client,
         })
     }
@@ -193,6 +206,8 @@ pub struct Connection {
     pub server_version: String,
     /// The context's namespace, or `default` if it names none.
     pub namespace: String,
+    /// Whether the context names its namespace, rather than leaving it to `default`.
+    pub names_namespace: bool,
     pub(crate) client: Client,
 }
 
@@ -276,7 +291,7 @@ impl Backend {
             .runtime
             .spawn(follow::resolve(connection.client.clone(), pod));
         async move {
-            task.await.map_err(|error| ClusterError::ReadWorkload {
+            task.await.map_err(|error| ClusterError::FollowWorkload {
                 workload,
                 error: error.to_string(),
             })?
@@ -411,9 +426,10 @@ users:
         assert!(
             error
                 .to_string()
-                .starts_with("Failed to reach context \"dev\""),
+                .starts_with("Failed to reach context \"dev\": "),
             "{error}"
         );
+        assert!(!error.to_string().contains("Error: "), "{error}");
     }
 
     #[tokio::test]
@@ -427,7 +443,27 @@ users:
 
         assert_eq!(connection.context, "dev");
         assert_eq!(connection.server_version, "v1.35.0");
+        assert_eq!(connection.namespace, "default");
+        assert!(!connection.names_namespace);
         assert!(served.await.unwrap().starts_with("GET /version"));
+    }
+
+    #[tokio::test]
+    async fn connect_says_whether_the_context_names_its_namespace() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let yaml = kubeconfig(&server, "{}").replacen(
+            "      user: dev\n",
+            "      user: dev\n      namespace: team-a\n",
+            1,
+        );
+        let contexts = Contexts::from_yaml(&yaml).unwrap();
+        tokio::spawn(serve_version(listener));
+
+        let connection = contexts.connect("dev".into()).await.unwrap();
+
+        assert_eq!(connection.namespace, "team-a");
+        assert!(connection.names_namespace);
     }
 
     #[cfg(unix)]

@@ -12,6 +12,7 @@ mod limited;
 mod links;
 mod logs;
 mod pods;
+mod reason;
 mod selector;
 mod state;
 mod watch;

@@ -531,20 +531,22 @@ fn simulated(directory: &Path, context: &str) {
             })
         }
     };
+    let log_summary = |prefix: &'static str| {
+        move |window: &mut Window, _: &mut App| {
+            window
+                .try_find("log-summary")
+                .and_then(|summary| summary.label().map(|label| label.starts_with(prefix)))
+                .unwrap_or(false)
+        }
+    };
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let mut scene = Scene::open(Contexts::from_yaml(&kubeconfig), mode);
-        scene.wait_until(notice("You can't list Pods"));
-        scene.save(directory, &format!("sim-pods-refused-{suffix}.png"));
-
-        let handle = scene.handle;
-        scene
-            .cx
-            .update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                window.click("notice-action", cx);
-            })
-            .expect("preview window closed");
-        scene.wait_until(|window, _| window.try_find("notice-title").is_none());
+        scene.wait_until(|window, _| {
+            window.try_find("context-namespace-note").is_some()
+                && window.try_find("notice-title").is_none()
+        });
+        let namespace = scene.cx.update(|cx| scene.root.read(cx).namespace(cx));
+        let namespace = namespace.expect("no namespace chosen");
         let root = scene.root.clone();
         scene.cx.update(|cx| {
             root.update(cx, |root, cx| {
@@ -564,6 +566,8 @@ fn simulated(directory: &Path, context: &str) {
                     .unwrap_or(false)
         });
         scene.save(directory, &format!("sim-pods-{suffix}.png"));
+
+        let handle = scene.handle;
         scene
             .cx
             .update_window(handle, |_, window, cx| {
@@ -571,8 +575,25 @@ fn simulated(directory: &Path, context: &str) {
                 window.within("details-tabs").click(1usize, cx);
             })
             .expect("preview window closed");
+        scene.wait_until(|window, _| window.try_find("details-message").is_some());
         scene.save(directory, &format!("sim-events-refused-{suffix}.png"));
 
+        scene
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.tail_workload(cx)));
+        scene.wait_until(log_summary("Can't read replicaset/"));
+        scene.save(directory, &format!("sim-workload-refused-{suffix}.png"));
+
+        scene
+            .cx
+            .update_window(handle, |_, window, cx| {
+                root.update(cx, |root, cx| root.set_namespace(None, window, cx));
+            })
+            .expect("preview window closed");
+        scene.wait_until(notice("You can't list Pods"));
+        scene.save(directory, &format!("sim-pods-refused-{suffix}.png"));
+
+        scene.set_namespace(&namespace);
         scene.show_view(View::Deployments);
         scene.wait_until(notice("You can't list Deployments"));
         scene.save(directory, &format!("sim-deployments-refused-{suffix}.png"));

@@ -53,9 +53,9 @@ Check what the app's watches make of it, without opening a window:
 SIM_CLUSTER=rbac scripts/sim-cluster.sh check-limited
 ```
 
-This runs the ignored core test `limited_user` against the context. It checks that the cluster-wide pod list is refused, that the pod watch falls back to `team-a` and lists its pods, that Deployments and Nodes are refused with the API's reason, that pod details read while their events are refused, that following a pod's workload says the ReplicaSet is refused, and that logs tail.
+This runs the ignored core test `limited_user` against the context. It checks that the cluster-wide pod list is refused, that the pod watch falls back to `team-a` and lists its pods, that Deployments and Nodes are refused with the API's reason, that pod details read while their events are refused with the API's message alone, that following a pod's workload says the ReplicaSet is refused in the same way, and that logs tail.
 
-To see the app itself, render it offscreen against the context. This writes `sim-pods-refused`, `sim-pods`, `sim-events-refused` and `sim-deployments-refused`, in dark and light:
+To see the app itself, render it offscreen against the context. This writes `sim-pods`, opened on `team-a` because the context names it, then `sim-events-refused`, `sim-workload-refused` after `w`, `sim-pods-refused` on **All namespaces**, and `sim-deployments-refused`, in dark and light:
 
 ```sh
 TAFFRAIL_PREVIEW_CONTEXT=kwok-rbac-jane TAFFRAIL_PREVIEW_DIR=target/sim-preview \
