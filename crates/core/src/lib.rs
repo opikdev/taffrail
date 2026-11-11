@@ -8,6 +8,7 @@ mod environment;
 #[cfg(test)]
 mod fake_api;
 mod follow;
+mod jobs;
 #[cfg(test)]
 mod limited;
 mod links;
@@ -26,6 +27,7 @@ pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
 pub use details::{ContainerDetails, ObjectDetails, ObjectEvent, PodDetails};
 pub use environment::use_login_shell_environment;
 pub use follow::Follow;
+pub use jobs::{JobDetails, JobRow};
 pub use links::ObjectLink;
 pub use logs::{
     Bucket, CONTEXT_SEPARATOR, ContextBlock, ContextLine, ExportProgress, FilterError,

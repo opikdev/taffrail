@@ -8,6 +8,7 @@ pods="${SIM_PODS:-5000}"
 deployments="${SIM_DEPLOYMENTS:-500}"
 statefulsets="${SIM_STATEFULSETS:-200}"
 daemonsets="${SIM_DAEMONSETS:-50}"
+jobs="${SIM_JOBS:-200}"
 log_rate="${SIM_LOG_RATE:-200}"
 limited_user="${SIM_LIMITED_USER:-jane}"
 limited_namespace="${SIM_LIMITED_NAMESPACE:-team-a}"
@@ -55,6 +56,7 @@ YAML
   add_deployments
   add_statefulsets
   add_daemonsets
+  add_jobs
 
   docker run -d --name "$generator" --network none \
     -v "$log_dir:$log_dir" -v "$root/scripts:/scripts:ro" python:3.13-alpine \
@@ -143,6 +145,14 @@ add_daemonsets() {
   local i
   for ((i = 0; i < daemonsets; i++)); do
     printf -- '---\napiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: sim-ds-%04d\nspec:\n  selector:\n    matchLabels:\n      app: sim-ds-%04d\n  template:\n    metadata:\n      labels:\n        app: sim-ds-%04d\n    spec:\n      nodeSelector:\n        taffrail.dev/sim-daemonset: "%04d"\n      containers:\n      - name: app\n        image: busybox\n' "$i" "$i" "$i" "$i"
+  done | k apply -f - >/dev/null
+}
+
+# Suspended Jobs, so the Jobs table has rows without adding pods.
+add_jobs() {
+  local i
+  for ((i = 0; i < jobs; i++)); do
+    printf -- '---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: sim-job-%04d\nspec:\n  suspend: true\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n      - name: app\n        image: busybox\n' "$i"
   done | k apply -f - >/dev/null
 }
 

@@ -432,6 +432,173 @@ fn daemon_set_objects(created: &str) -> Vec<(String, String)> {
     kind_objects("apps/v1", "daemonsets", "DaemonSetList", &items)
 }
 
+/// A sample Job, with times relative to now so that durations read as they would live.
+struct SampleJob {
+    namespace: &'static str,
+    name: &'static str,
+    cron_job: Option<&'static str>,
+    completions: u32,
+    parallelism: u32,
+    /// Pods `[succeeded, active, failed]`.
+    pods: [u32; 3],
+    /// Seconds since it started, and how long it ran if it finished.
+    started_ago: i64,
+    ran: Option<i64>,
+    /// The condition that finished it, as `(type, reason)`.
+    finished: Option<(&'static str, &'static str)>,
+    suspended: bool,
+}
+
+const JOBS: [SampleJob; 8] = [
+    SampleJob {
+        namespace: "batch",
+        name: "nightly-backup-29381400",
+        cron_job: Some("nightly-backup"),
+        completions: 1,
+        parallelism: 1,
+        pods: [0, 0, 7],
+        started_ago: 1_500,
+        ran: Some(1_320),
+        finished: Some(("Failed", "BackoffLimitExceeded")),
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "payments",
+        name: "ledger-reconcile-29381540",
+        cron_job: Some("ledger-reconcile"),
+        completions: 1,
+        parallelism: 1,
+        pods: [0, 0, 1],
+        started_ago: 900,
+        ran: Some(600),
+        finished: Some(("Failed", "DeadlineExceeded")),
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "search",
+        name: "reindex-catalog",
+        cron_job: None,
+        completions: 4,
+        parallelism: 2,
+        pods: [1, 2, 2],
+        started_ago: 480,
+        ran: None,
+        finished: None,
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "reports",
+        name: "nightly-report-29381552",
+        cron_job: Some("nightly-report"),
+        completions: 1,
+        parallelism: 1,
+        pods: [0, 1, 0],
+        started_ago: 190,
+        ran: None,
+        finished: None,
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "batch",
+        name: "image-thumbnails",
+        cron_job: None,
+        completions: 20,
+        parallelism: 5,
+        pods: [12, 5, 0],
+        started_ago: 2_460,
+        ran: None,
+        finished: None,
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "reports",
+        name: "nightly-report-29380112",
+        cron_job: Some("nightly-report"),
+        completions: 1,
+        parallelism: 1,
+        pods: [1, 0, 0],
+        started_ago: 86_590,
+        ran: Some(130),
+        finished: Some(("Complete", "CompletionsReached")),
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "observability",
+        name: "log-compaction-29381500",
+        cron_job: Some("log-compaction"),
+        completions: 1,
+        parallelism: 1,
+        pods: [1, 0, 0],
+        started_ago: 3_300,
+        ran: Some(45),
+        finished: Some(("Complete", "CompletionsReached")),
+        suspended: false,
+    },
+    SampleJob {
+        namespace: "ml",
+        name: "train-embeddings",
+        cron_job: None,
+        completions: 8,
+        parallelism: 2,
+        pods: [0, 0, 0],
+        started_ago: 0,
+        ran: None,
+        finished: None,
+        suspended: true,
+    },
+];
+
+fn job_objects() -> Vec<(String, String)> {
+    let at = |ago: i64| {
+        (chrono::Utc::now() - chrono::Duration::seconds(ago))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    let items: Vec<_> = JOBS
+        .iter()
+        .map(|job| {
+            let SampleJob { namespace, name, .. } = *job;
+            let [succeeded, active, failed] = job.pods;
+            let owner = job.cron_job.map_or_else(String::new, |cron_job| {
+                format!(
+                    r#","ownerReferences":[{{"apiVersion":"batch/v1","kind":"CronJob","name":"{cron_job}","uid":"cj-{cron_job}","controller":true}}]"#
+                )
+            });
+            let mut status = format!(r#""succeeded":{succeeded},"active":{active},"failed":{failed},"ready":{active}"#);
+            if !job.suspended {
+                write!(status, r#","startTime":"{}""#, at(job.started_ago)).unwrap();
+            }
+            if let Some(ran) = job.ran {
+                let ended = at(job.started_ago - ran);
+                if job.finished.is_some_and(|(kind, _)| kind == "Complete") {
+                    write!(status, r#","completionTime":"{ended}""#).unwrap();
+                }
+            }
+            if let Some((kind, reason)) = job.finished {
+                let message = match kind {
+                    "Complete" => "Reached expected number of succeeded pods",
+                    _ if reason == "DeadlineExceeded" => "Job was active longer than specified deadline",
+                    _ => "Job has reached the specified backoff limit",
+                };
+                write!(
+                    status,
+                    r#","conditions":[{{"type":"{kind}","status":"True","reason":"{reason}","message":"{message}","lastTransitionTime":"{}"}}]"#,
+                    at(job.started_ago - job.ran.unwrap_or_default()),
+                )
+                .unwrap();
+            }
+            let created = at(job.started_ago.max(60) + 2);
+            let body = format!(
+                r#"{{"apiVersion":"batch/v1","kind":"Job","metadata":{{"namespace":"{namespace}","name":"{name}","uid":"job-{name}","resourceVersion":"1","creationTimestamp":"{created}","labels":{{"app":"{name}","batch.kubernetes.io/job-name":"{name}"}}{owner},"managedFields":[{{"manager":"kube-controller-manager"}}]}},"spec":{{"completions":{completions},"parallelism":{parallelism},"backoffLimit":6,"activeDeadlineSeconds":600,"ttlSecondsAfterFinished":86400,"completionMode":"NonIndexed","suspend":{suspended},"selector":{{"matchLabels":{{"batch.kubernetes.io/controller-uid":"job-{name}"}}}},"template":{{"metadata":{{"labels":{{"app":"{name}"}}}},"spec":{{"restartPolicy":"Never","containers":[{{"name":"{name}","image":"registry.example.com/{name}:1.4.0"}}]}}}}}},"status":{{{status}}}}}"#,
+                completions = job.completions,
+                parallelism = job.parallelism,
+                suspended = job.suspended,
+            );
+            (namespace, name, body)
+        })
+        .collect();
+    kind_objects("batch/v1", "jobs", "JobList", &items)
+}
+
 fn pod_body(created: &str) -> String {
     format!(
         r#"{{"kind":"Pod","apiVersion":"v1","metadata":{{"namespace":"payments","name":"checkout-api-7f9c6d-h7vcd","uid":"3f1c9a7e-52ab-4b7e-9f55-0a0f6d1f1a11","resourceVersion":"188274","creationTimestamp":"{created}","labels":{{"app":"checkout-api","pod-template-hash":"7f9c6d","tier":"backend"}},"ownerReferences":[{{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"checkout-api-7f9c6d","uid":"9","controller":true}}],"managedFields":[{{"manager":"kube-controller-manager"}}]}},"spec":{{"nodeName":"node-07","restartPolicy":"Always","serviceAccountName":"checkout-api","containers":[{{"name":"app","image":"registry.example.com/checkout-api:2.31.0","ports":[{{"containerPort":8080,"protocol":"TCP"}}],"env":[{{"name":"POSTGRES_URL","value":"postgres://10.4.12.8:5432/checkout"}}],"resources":{{"limits":{{"memory":"512Mi"}},"requests":{{"cpu":"250m","memory":"256Mi"}}}}}},{{"name":"proxy","image":"registry.example.com/envoy:1.30.2"}}]}},"status":{{"phase":"Running","podIP":"10.4.3.21","hostIP":"10.0.7.4","containerStatuses":[{{"name":"app","image":"checkout-api:2.31.0","imageID":"x","ready":false,"restartCount":7,"state":{{"waiting":{{"reason":"CrashLoopBackOff"}}}},"lastState":{{"terminated":{{"exitCode":1,"reason":"Error"}}}}}},{{"name":"proxy","image":"envoy:1.30.2","imageID":"x","ready":true,"restartCount":0,"state":{{"running":{{"startedAt":"{created}"}}}}}}]}}}}"#
@@ -1247,6 +1414,15 @@ pub fn run(directory: PathBuf) {
         View::DaemonSets,
         "kube-proxy",
         ("daemonsets", "daemonset-details"),
+    );
+
+    workload_scenes(
+        &directory,
+        created,
+        job_objects(),
+        View::Jobs,
+        "nightly-backup-29381400",
+        ("jobs", "job-details"),
     );
 
     let mut empty = connected(&server, ThemeMode::Light);
