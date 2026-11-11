@@ -29,14 +29,14 @@ use crate::logs::{
     chosen_severity, dock_height,
 };
 use crate::palette::{
-    ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, GoBack,
-    NextError, OpenLink, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource,
-    PreviousError, ReloadContexts, ShowAbout, ShowEvents, ShowPods, ShowShortcuts, ShowSummary,
-    ShowView, ShowYaml, SwitchContext, SwitchNamespace, TailSelection, TailSelector, TailWorkload,
-    ToggleFollow, ToggleSidebar, groups, render_shortcuts,
+    ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter,
+    FollowSelected, GoBack, NextError, OpenLink, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY,
+    PaletteSource, PreviousError, ReloadContexts, ShowAbout, ShowEvents, ShowPods, ShowShortcuts,
+    ShowSummary, ShowView, ShowYaml, SwitchContext, SwitchNamespace, TailSelection, TailSelector,
+    TailWorkload, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::sidebar::{SidebarItem, resource_sidebar};
-use crate::table::{ALL_NAMESPACES, PodCounts, ResourceTable, SelectorFilter, TableRow};
+use crate::table::{ALL_NAMESPACES, Jump, PodCounts, ResourceTable, SelectorFilter, TableRow};
 use crate::timeline::{LOG_TIMELINE_CONTEXT, TimelineNext, TimelinePrevious};
 use crate::views::{Panel, ResourcePanel, View, new_panel};
 use crate::windows;
@@ -291,6 +291,8 @@ pub struct Root {
     /// Every other view, created as it is first opened.
     panels: Vec<Box<dyn Panel>>,
     view: View,
+    /// The view shown before this one, which choosing a namespace returns to.
+    previous_view: View,
     /// Hidden columns of views not yet opened, from saved state.
     saved_columns: std::collections::BTreeMap<String, Vec<String>>,
     filter: Entity<InputState>,
@@ -346,7 +348,7 @@ impl Root {
                 }
                 InputEvent::PressEnter { .. } => {
                     this.focus_handle.focus(window, cx);
-                    this.open_selected(cx);
+                    this.open_selected(window, cx);
                 }
                 _ => {}
             },
@@ -392,6 +394,7 @@ impl Root {
             pods,
             panels: Vec::new(),
             view: View::Pods,
+            previous_view: View::Pods,
             saved_columns: view_columns,
             filter,
             namespace_picker,
@@ -485,6 +488,7 @@ impl Root {
         }
         let previous = self.view;
         if previous != view {
+            self.previous_view = previous;
             self.panel_mut_for(previous).close_details(cx);
             if previous != View::Pods {
                 self.panel_mut_for(previous).stop(cx);
@@ -865,13 +869,31 @@ impl Root {
         cx.notify();
     }
 
-    /// Opens the selected row, or the first row if nothing is selected.
-    fn open_selected(&mut self, cx: &mut Context<Self>) {
-        if self.panel().has_selection(cx) {
-            self.open_details(cx);
-        } else {
+    /// Follows the selected row where it leads, or opens its details, or selects the first
+    /// row if nothing is selected.
+    fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.panel().has_selection(cx) {
             self.move_selection(1, cx);
+            return;
         }
+        match self.panel().selected_jump(cx) {
+            Some(jump) => self.jump(jump, window, cx),
+            None => self.open_details(cx),
+        }
+    }
+
+    /// Goes where a row leads. Choosing a namespace returns to the view before, or to Pods
+    /// if that view is not in namespaces.
+    fn jump(&mut self, jump: Jump, window: &mut Window, cx: &mut Context<Self>) {
+        match jump {
+            Jump::Namespace(namespace) => {
+                let back = self.previous_view;
+                let returns = back != self.view && self.panel_for(back).namespaced();
+                self.set_namespace(Some(namespace), window, cx);
+                self.show_view(if returns { back } else { View::Pods }, window, cx);
+            }
+        }
+        self.remember_state(window, cx);
     }
 
     fn open_pod(&mut self, key: PodKey, window: &mut Window, cx: &mut Context<Self>) {
@@ -1544,6 +1566,11 @@ impl Root {
             has_selection: self.panel().details().is_some(),
             has_follow: self.panel().selected_follow(cx).is_some(),
             has_pods: self.panel().selected_pods(cx).is_some(),
+            jump: self
+                .panel()
+                .selected_jump(cx)
+                .filter(|_| self.panel().details().is_some())
+                .map(|jump| jump.label()),
             has_tail: self.logs.is_some(),
             connected: self.connection.is_some(),
             back: self.history.last().map(|place| place.label.clone()),
@@ -2083,9 +2110,15 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
                 // A focused button or link takes `Enter` itself.
                 if this.focus_handle.is_focused(window) || this.panel().table_focused(window, cx) {
-                    this.open_selected(cx);
+                    this.open_selected(window, cx);
                 } else {
                     cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FollowSelected, window, cx| {
+                this.close_overlays_keeping_focus(window, cx);
+                if let Some(jump) = this.panel().selected_jump(cx) {
+                    this.jump(jump, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
@@ -4532,6 +4565,155 @@ users:
 
         press(handle, "1", cx);
         wait_for_label(handle, "front-2", cx).await;
+    }
+
+    const NAMESPACES: &str = "/api/v1/namespaces";
+    const NAMESPACE_LIST_BODY: &str = r#"{"kind":"NamespaceList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"shop","resourceVersion":"1"},"status":{"phase":"Active"}},{"metadata":{"name":"web","resourceVersion":"1"},"status":{"phase":"Active"}},{"metadata":{"name":"old","resourceVersion":"1","deletionTimestamp":"2026-01-01T00:00:00Z"},"status":{"phase":"Terminating"}}]}"#;
+    const NAMESPACE_BODY: &str = r#"{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"old","resourceVersion":"1"},"status":{"phase":"Terminating"}}"#;
+
+    /// Pods in two namespaces, and three namespaces. `forbidden` lists paths the API refuses.
+    async fn open_namespaces(
+        forbidden: Vec<&'static str>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let server = serve(Fixture {
+            pod_list: PODS_ON_NODES_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![
+                (NAMESPACES.into(), NAMESPACE_LIST_BODY.into()),
+                ("/api/v1/namespaces/old".into(), NAMESPACE_BODY.into()),
+                ("/api/v1/namespaces/web".into(), NAMESPACE_BODY.into()),
+                (NODES.into(), NODE_LIST_BODY.into()),
+            ],
+        });
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_label(handle, "front-2", cx).await;
+        (handle, root)
+    }
+
+    #[gpui_kit::test]
+    async fn the_namespaces_view_counts_pods_in_each(cx: &mut TestAppContext) {
+        let (handle, root) = open_namespaces(Vec::new(), cx).await;
+        press(handle, "7", cx);
+
+        wait_for_label(handle, "old", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find_all_by_label("Filter namespaces").len(), 1);
+            assert!(window.try_find("namespace-picker").is_none());
+        })
+        .unwrap();
+        let rows = root.read_with(cx, |root, cx| {
+            let panel = root.panel();
+            (0..3)
+                .map(|row| panel.row_cells(row, cx))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            [
+                ["old", "Terminating", "0", ""],
+                ["shop", "Active", "1", ""],
+                ["web", "Active", "2", ""],
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn enter_on_a_namespace_chooses_it_and_returns_to_the_view_before(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, root) = open_namespaces(Vec::new(), cx).await;
+        press(handle, "7", cx);
+        wait_for_label(handle, "web", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "j", cx);
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details").label(), Some("Namespace details"));
+            assert_eq!(window.find("details-title").label(), Some("web"));
+            assert_eq!(
+                window.find("use-namespace").label(),
+                Some("Use namespace web")
+            );
+        })
+        .unwrap();
+        press(handle, "enter", cx);
+
+        wait_for_label(handle, "Filter pods", cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("namespace-picker").value(), Some("web"));
+            assert!(window.find_all_by_label("api-1").is_empty());
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx).as_deref(), Some("web"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn the_use_namespace_button_chooses_it(cx: &mut TestAppContext) {
+        let (handle, root) = open_namespaces(Vec::new(), cx).await;
+        press(handle, "7", cx);
+        wait_for_label(handle, "shop", cx).await;
+        press(handle, "j", cx);
+        press(handle, "j", cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("use-namespace", cx);
+        })
+        .unwrap();
+
+        wait_for_label(handle, "api-1", cx).await;
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.view, View::Pods);
+            assert_eq!(root.namespace(cx).as_deref(), Some("shop"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn choosing_a_namespace_from_a_cluster_view_goes_to_pods(cx: &mut TestAppContext) {
+        let (handle, root) = open_namespaces(Vec::new(), cx).await;
+        press(handle, "6", cx);
+        wait_for_label(handle, "node-2", cx).await;
+        press(handle, "7", cx);
+        wait_for_label(handle, "shop", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "j", cx);
+        press(handle, "enter", cx);
+
+        wait_for_label(handle, "api-1", cx).await;
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.view, View::Pods);
+            assert_eq!(root.namespace(cx).as_deref(), Some("shop"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_namespace_list_says_so_for_the_whole_cluster(cx: &mut TestAppContext) {
+        let (handle, root) = open_namespaces(vec![NAMESPACES], cx).await;
+        press(handle, "7", cx);
+
+        wait_for_notice(handle, "You can't list Namespaces in this cluster", cx).await;
+        root.read_with(cx, |root, cx| {
+            let locked: Vec<_> = root
+                .sidebar_items(cx)
+                .into_iter()
+                .filter(|item| item.forbidden)
+                .map(|item| item.view)
+                .collect();
+            assert_eq!(locked, [View::Namespaces]);
+        });
     }
 
     #[gpui_kit::test]

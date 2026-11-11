@@ -13,6 +13,7 @@ mod jobs;
 mod limited;
 mod links;
 mod logs;
+mod namespaces;
 mod nodes;
 mod pods;
 mod reason;
@@ -36,6 +37,7 @@ pub use logs::{
     LogFilter, LogFilterScan, LogLine, LogProgress, LogReader, LogTail, LogTarget, MAX_TAIL_PODS,
     Severity, TimelineView, export_directory, json_line,
 };
+pub use namespaces::{NamespaceDetails, NamespaceRow};
 pub use nodes::{NodeDetails, NodeRow};
 pub use pods::{Owner, PodFeed, PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use selector::Selector;

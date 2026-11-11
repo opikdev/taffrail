@@ -120,6 +120,28 @@ pub trait TableRow: Row {
     fn pod_count(&self, _counts: &PodCounts) -> Option<usize> {
         None
     }
+
+    /// Where `Enter` on the selected row goes, for a kind whose rows lead elsewhere. Other
+    /// kinds open their details.
+    fn jump(&self) -> Option<Jump> {
+        None
+    }
+}
+
+/// Where `Enter` on a selected row goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Jump {
+    /// Chooses this namespace, and returns to the view before.
+    Namespace(String),
+}
+
+impl Jump {
+    /// What the palette and the details button call it.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Namespace(namespace) => format!("Use namespace {namespace}"),
+        }
+    }
 }
 
 /// Pods by the node they run on and by namespace, counted from the pod watch.

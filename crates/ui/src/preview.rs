@@ -318,6 +318,53 @@ fn node_objects(created: &str) -> Vec<(String, String)> {
     objects
 }
 
+/// Namespaces as `(name, phase)`, with one being deleted.
+const NAMESPACES: [(&str, &str); 9] = [
+    ("billing", "Active"),
+    ("default", "Active"),
+    ("ingress", "Active"),
+    ("kube-system", "Active"),
+    ("legacy-reports", "Terminating"),
+    ("observability", "Active"),
+    ("payments", "Active"),
+    ("storefront", "Active"),
+    ("kube-public", "Active"),
+];
+
+fn namespace_body(index: usize, created: &str) -> String {
+    let (name, phase) = NAMESPACES[index];
+    let (deleted, conditions) = if phase == "Terminating" {
+        (
+            r#","deletionTimestamp":"2026-11-07T10:30:00Z""#,
+            r#","conditions":[{"type":"NamespaceContentRemaining","status":"True","reason":"SomeResourcesRemain","message":"Some resources are remaining: persistentvolumeclaims. has 2 resource instances"},{"type":"NamespaceFinalizersRemaining","status":"True","reason":"SomeFinalizersRemain","message":"Some content in the namespace has finalizers remaining: kubernetes.io/pvc-protection in 2 resource instances"}]"#,
+        )
+    } else {
+        ("", "")
+    };
+    format!(
+        r#"{{"apiVersion":"v1","kind":"Namespace","metadata":{{"name":"{name}","uid":"ns-{name}","resourceVersion":"1","creationTimestamp":"{created}"{deleted},"labels":{{"kubernetes.io/metadata.name":"{name}","team":"platform"}},"annotations":{{"owner":"platform@example.com"}},"managedFields":[{{"manager":"kubectl"}}]}},"spec":{{"finalizers":["kubernetes"]}},"status":{{"phase":"{phase}"{conditions}}}}}"#
+    )
+}
+
+/// The namespace list, and each namespace by path, for the Namespaces view and its details.
+fn namespace_objects(created: &str) -> Vec<(String, String)> {
+    let items: Vec<_> = (0..NAMESPACES.len())
+        .map(|index| namespace_body(index, created))
+        .collect();
+    let list = format!(
+        r#"{{"kind":"NamespaceList","apiVersion":"v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+        items.join(",")
+    );
+    let mut objects = vec![("/api/v1/namespaces".to_owned(), list)];
+    objects.extend(NAMESPACES.iter().enumerate().map(|(index, (name, _))| {
+        (
+            format!("/api/v1/namespaces/{name}"),
+            namespace_body(index, created),
+        )
+    }));
+    objects
+}
+
 /// The ReplicaSets of the `checkout-api` rollout and their Deployment, for following it.
 fn workload_objects() -> Vec<(String, String)> {
     let replica_set = |hash: &str| {
@@ -1533,6 +1580,30 @@ pub fn run(directory: PathBuf) {
                 .is_some_and(|title| title.label().is_some_and(|label| label.contains("Nodes")))
         });
         forbidden.save(&directory, &format!("no-permission-nodes-{suffix}.png"));
+    }
+
+    let namespaces = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects: namespace_objects(created),
+    });
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut table = connected(&namespaces, mode);
+        table.show_view(View::Namespaces);
+        table.wait_until(|window, _| !window.find_all_by_label("kube-public").is_empty());
+        table.save(&directory, &format!("namespaces-{suffix}.png"));
+        let root = table.root.clone();
+        table
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        table.wait_until(|window, _| window.try_find("use-namespace").is_some());
+        table.settle();
+        table.save(&directory, &format!("namespace-details-{suffix}.png"));
     }
 
     let mut empty = connected(&server, ThemeMode::Light);

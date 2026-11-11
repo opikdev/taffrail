@@ -11,13 +11,13 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, JobRow, NodeRow, ObjectKey,
-    ResourceWatch, StatefulSetRow, WatchError,
+    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, JobRow, NamespaceRow, NodeRow,
+    ObjectKey, ResourceWatch, StatefulSetRow, WatchError,
 };
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
 use crate::root::{Notice, Root, no_rows_notice};
-use crate::table::{PodCounts, ResourceTable, SelectorFilter, column_names, show_in_place};
+use crate::table::{Jump, PodCounts, ResourceTable, SelectorFilter, column_names, show_in_place};
 
 /// A resource view, in sidebar order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,16 +28,18 @@ pub enum View {
     DaemonSets,
     Jobs,
     Nodes,
+    Namespaces,
 }
 
 impl View {
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 7] = [
         View::Pods,
         View::Deployments,
         View::StatefulSets,
         View::DaemonSets,
         View::Jobs,
         View::Nodes,
+        View::Namespaces,
     ];
 
     /// The sidebar label, which also names the view in saved state.
@@ -49,6 +51,7 @@ impl View {
             View::DaemonSets => "DaemonSets",
             View::Jobs => "Jobs",
             View::Nodes => "Nodes",
+            View::Namespaces => "Namespaces",
         }
     }
 
@@ -58,7 +61,7 @@ impl View {
             View::Pods | View::Deployments | View::StatefulSets | View::DaemonSets | View::Jobs => {
                 "Workloads"
             }
-            View::Nodes => "Cluster",
+            View::Nodes | View::Namespaces => "Cluster",
         }
     }
 
@@ -73,6 +76,7 @@ impl View {
             View::DaemonSets => "4",
             View::Jobs => "5",
             View::Nodes => "6",
+            View::Namespaces => "7",
         }
     }
 
@@ -84,6 +88,7 @@ impl View {
             View::DaemonSets => IconName::Boxes,
             View::Jobs => IconName::Play,
             View::Nodes => IconName::Server,
+            View::Namespaces => IconName::Folder,
         }
     }
 
@@ -138,6 +143,7 @@ pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box
         View::DaemonSets => Box::new(ResourcePanel::<DaemonSetRow>::new(view, window, cx)),
         View::Jobs => Box::new(ResourcePanel::<JobRow>::new(view, window, cx)),
         View::Nodes => Box::new(ResourcePanel::<NodeRow>::new(view, window, cx)),
+        View::Namespaces => Box::new(ResourcePanel::<NamespaceRow>::new(view, window, cx)),
     }
 }
 
@@ -185,6 +191,8 @@ pub trait Panel {
     fn selected_follow(&self, cx: &App) -> Option<Follow>;
     /// The pods **Show its pods** shows for the selected object, and their namespace.
     fn selected_pods(&self, cx: &App) -> Option<(SelectorFilter, Option<String>)>;
+    /// Where `Enter` on the selected row goes, for a kind whose rows lead elsewhere.
+    fn selected_jump(&self, cx: &App) -> Option<Jump>;
     /// Whether a column counts pods, so the panel wants [`PodCounts`].
     fn counts_pods(&self) -> bool;
     fn set_pod_counts(&self, counts: Arc<PodCounts>, cx: &mut App);
@@ -409,6 +417,14 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
             .delegate()
             .selected_object()
             .and_then(|row| row.pods())
+    }
+
+    fn selected_jump(&self, cx: &App) -> Option<Jump> {
+        self.table
+            .read(cx)
+            .delegate()
+            .selected_object()
+            .and_then(|row| row.jump())
     }
 
     fn counts_pods(&self) -> bool {

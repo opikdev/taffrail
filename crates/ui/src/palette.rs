@@ -41,6 +41,7 @@ actions!(
         ShowPods,
         ClearSelector,
         GoBack,
+        FollowSelected,
     ]
 );
 
@@ -87,11 +88,11 @@ pub struct TailSelector {
 /// Every key the app answers to, for the shortcut sheet.
 pub const SHORTCUTS: [(&str, &str); 23] = [
     (MODIFIER_K, "Open the command palette"),
-    ("1 – 6", "Go to a view, in sidebar order"),
+    ("1 – 7", "Go to a view, in sidebar order"),
     ("/", "Filter the current view"),
     ("f", "Filter log lines"),
     ("j  k", "Move through rows"),
-    ("Enter", "Open details"),
+    ("Enter", "Open details, or use the namespace"),
     ("l", "Tail logs for the selection"),
     ("w", "Tail the selected workload"),
     ("p", "Show the selected workload's pods"),
@@ -164,6 +165,8 @@ pub struct PaletteSource<'a> {
     pub has_follow: bool,
     /// Whether the selected object has pods to show, as a workload or a node has.
     pub has_pods: bool,
+    /// What `Enter` on the selection does, for a kind whose rows lead elsewhere.
+    pub jump: Option<String>,
     pub has_tail: bool,
     pub connected: bool,
     /// Where **Back** returns to, such as `pod api-1`, after following a link.
@@ -253,6 +256,14 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
         actions = actions.item(
             command("Show its pods", IconName::Box, ShowPods)
                 .keywords(["selector", "workload", "node"]),
+        );
+    }
+    if let Some(label) = source.jump {
+        actions = actions.item(
+            CommandItem::new()
+                .label(label)
+                .icon(Icon::new(IconName::ArrowRight))
+                .action(Box::new(FollowSelected)),
         );
     }
     if source.connected && source.has_selection && source.view == View::Pods {
