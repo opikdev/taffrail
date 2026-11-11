@@ -78,6 +78,13 @@ pub struct OpenLink {
     pub link: ObjectLink,
 }
 
+/// Sorts the table by a column, as clicking its header does.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct SortBy {
+    pub column: &'static str,
+}
+
 /// Follows the pods that a label selector matches, in the chosen namespace.
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = taffrail, no_json)]
@@ -86,12 +93,14 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 23] = [
+pub const SHORTCUTS: [(&str, &str); 26] = [
     (MODIFIER_K, "Open the command palette"),
     ("1 – 8", "Go to a view, in sidebar order"),
     ("/", "Filter the current view"),
     ("f", "Filter log lines"),
     ("j  k", "Move through rows"),
+    ("Home  End", "First or last row"),
+    ("PgUp  PgDn", "Move a page of rows"),
     (
         "Enter",
         "Open details, use a namespace or go to an event's object",
@@ -106,6 +115,7 @@ pub const SHORTCUTS: [(&str, &str); 23] = [
     ("Space", "Pause or follow logs"),
     ("n  N", "Next or previous error"),
     ("←  →", "Move along the log timeline"),
+    ("Tab", "Next control, out of the table"),
     (MODIFIER_C, "Copy selected log lines"),
     ("Esc", "Clear the filter, then close the panel"),
     (MODIFIER_B, "Show or hide the sidebar"),
@@ -174,6 +184,10 @@ pub struct PaletteSource<'a> {
     pub connected: bool,
     /// Where **Back** returns to, such as `pod api-1`, after following a link.
     pub back: Option<String>,
+    /// What a workload's or node's pods narrow the table to, such as `deployment/api`.
+    pub selector: Option<String>,
+    /// Each shown column, and the command that sorts by it next.
+    pub sort: Vec<(&'static str, String)>,
 }
 
 /// The selector a search spells, such as `app=api` or `tier in (web)`. A bare word
@@ -327,6 +341,15 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
             .item(command("Show events", IconName::Activity, ShowEvents))
             .item(command("Show YAML", IconName::FileText, ShowYaml));
     }
+    if let Some(selector) = source.selector {
+        actions = actions.item(
+            CommandItem::new()
+                .label("Show all pods")
+                .icon(Icon::new(IconName::X))
+                .keywords([selector, "selector".to_owned(), "clear".to_owned()])
+                .action(Box::new(ClearSelector)),
+        );
+    }
     if let Some(back) = source.back {
         actions = actions.item(
             CommandItem::new()
@@ -364,6 +387,15 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
             ShowShortcuts,
         ))
         .item(command("About Taffrail", IconName::Info, ShowAbout));
+    for (column, label) in source.sort {
+        actions = actions.item(
+            CommandItem::new()
+                .label(label)
+                .icon(Icon::new(IconName::ArrowDown))
+                .keywords(["sort", "order", "column"])
+                .action(Box::new(SortBy { column })),
+        );
+    }
 
     let pods = matching_pods(source.rows, source.query);
     let mut groups = Vec::new();
@@ -426,20 +458,29 @@ pub fn render_shortcuts(cx: &App) -> impl IntoElement + use<> {
                 .font_weight(FontWeight::MEDIUM)
                 .child("Keyboard shortcuts"),
         )
-        .children(SHORTCUTS.map(|(key, action)| {
-            h_flex()
-                .gap_3()
-                .child(
-                    div()
-                        .w(px(KEY_WIDTH))
-                        .flex_shrink_0()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(theme.mono_font_size)
-                        .text_color(theme.muted_foreground)
-                        .child(key),
-                )
-                .child(action)
-        }))
+        .children(
+            SHORTCUTS
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (key, action))| {
+                    h_flex()
+                        .id(("shortcut", ix))
+                        .test_support()
+                        .role(Role::Label)
+                        .aria_label(format!("{key}: {action}"))
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(KEY_WIDTH))
+                                .flex_shrink_0()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(theme.mono_font_size)
+                                .text_color(theme.muted_foreground)
+                                .child(key),
+                        )
+                        .child(action)
+                }),
+        )
 }
 
 #[cfg(test)]

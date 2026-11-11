@@ -32,8 +32,8 @@ use crate::palette::{
     ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter,
     FollowSelected, GoBack, NextError, OpenLink, OpenPalette, OpenPod, OpenSelected, PALETTE_KEY,
     PaletteSource, PreviousError, ReloadContexts, ShowAbout, ShowEvents, ShowPods, ShowShortcuts,
-    ShowSummary, ShowView, ShowYaml, SwitchContext, SwitchNamespace, TailSelection, TailSelector,
-    TailWorkload, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
+    ShowSummary, ShowView, ShowYaml, SortBy, SwitchContext, SwitchNamespace, TailSelection,
+    TailSelector, TailWorkload, ToggleFollow, ToggleSidebar, groups, render_shortcuts,
 };
 use crate::sidebar::{SidebarItem, resource_sidebar};
 use crate::table::{ALL_NAMESPACES, Jump, PodCounts, ResourceTable, SelectorFilter, TableRow};
@@ -49,6 +49,12 @@ actions!(
     [
         NextRow,
         PreviousRow,
+        FirstRow,
+        LastRow,
+        NextPage,
+        PreviousPage,
+        FocusNextControl,
+        FocusPreviousControl,
         CloseDetails,
         ClearFilter,
         ClearLogFilter,
@@ -106,6 +112,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", NextRow, Some(TABLE_KEYS)),
         KeyBinding::new("k", PreviousRow, Some(TABLE_KEYS)),
         KeyBinding::new("up", PreviousRow, Some(TABLE_KEYS)),
+        KeyBinding::new("home", FirstRow, Some(TABLE_KEYS)),
+        KeyBinding::new("end", LastRow, Some(TABLE_KEYS)),
+        KeyBinding::new("pagedown", NextPage, Some(TABLE_KEYS)),
+        KeyBinding::new("pageup", PreviousPage, Some(TABLE_KEYS)),
         KeyBinding::new("escape", CloseDetails, Some(TABLE_KEYS)),
         KeyBinding::new("enter", OpenSelected, Some(TABLE_KEYS)),
         KeyBinding::new("/", FocusFilter, Some(TABLE_KEYS)),
@@ -139,28 +149,22 @@ pub fn init(cx: &mut App) {
     cx.bind_keys(
         View::ALL.map(|view| KeyBinding::new(view.key(), ShowView { view }, Some(TABLE_KEYS))),
     );
-    // GPUI Kit's table takes `Tab` to move between cells, which keeps focus in it. Rows are
-    // chosen whole here, so `Tab` and `Shift+Tab` leave the table for the next control,
-    // such as a link in the details panel.
-    cx.intercept_keystrokes(|event, window, cx| {
-        let key = &event.keystroke;
-        let modifiers = key.modifiers;
-        let in_table = event
-            .context_stack
-            .iter()
-            .any(|context| context.contains(TABLE_CONTEXT));
-        if key.key != "tab" || !in_table || modifiers.control || modifiers.alt || modifiers.platform
-        {
-            return;
-        }
-        if modifiers.shift {
-            window.focus_prev(cx);
-        } else {
-            window.focus_next(cx);
-        }
-        cx.stop_propagation();
-    })
-    .detach();
+    // GPUI Kit's table binds these keys to its own selection, which here only mirrors the
+    // rows chosen whole, and binds `Tab` to move between cells, which would keep focus in
+    // the table. Its bindings come first, so these replace them while the table has focus.
+    cx.bind_keys([
+        KeyBinding::new("down", NextRow, Some(TABLE_CONTEXT)),
+        KeyBinding::new("up", PreviousRow, Some(TABLE_CONTEXT)),
+        KeyBinding::new("home", FirstRow, Some(TABLE_CONTEXT)),
+        KeyBinding::new("end", LastRow, Some(TABLE_CONTEXT)),
+        KeyBinding::new("pagedown", NextPage, Some(TABLE_CONTEXT)),
+        KeyBinding::new("pageup", PreviousPage, Some(TABLE_CONTEXT)),
+        KeyBinding::new("escape", CloseDetails, Some(TABLE_CONTEXT)),
+        KeyBinding::new("tab", FocusNextControl, Some(TABLE_CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPreviousControl, Some(TABLE_CONTEXT)),
+        KeyBinding::new("left", NoAction, Some(TABLE_CONTEXT)),
+        KeyBinding::new("right", NoAction, Some(TABLE_CONTEXT)),
+    ]);
 }
 
 const TITLE_BAR_HEIGHT: f32 = 40.;
@@ -311,6 +315,8 @@ pub struct Root {
     pending: Option<Pending>,
     palette: Option<Entity<CommandState>>,
     sheet: Option<Sheet>,
+    /// Where focus was before the palette or a sheet opened, for closing it to return to.
+    return_focus: Option<FocusHandle>,
     focus_handle: FocusHandle,
     session: Session,
     sidebar_collapsed: bool,
@@ -323,6 +329,7 @@ pub struct Root {
     _namespace_events: Subscription,
     _appearance: Subscription,
     _bounds: Subscription,
+    _focus_lost: Subscription,
 }
 
 impl Root {
@@ -349,7 +356,7 @@ impl Root {
                     this.apply_filter(filter, cx);
                 }
                 InputEvent::PressEnter { .. } => {
-                    this.focus_handle.focus(window, cx);
+                    this.focus_table_or_root(window, cx);
                     this.open_selected(window, cx);
                 }
                 _ => {}
@@ -381,6 +388,11 @@ impl Root {
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
             this.remember_state(window, cx);
         });
+        // Focus is lost when what held it goes away, such as a link in a details panel that
+        // closed, or a table whose view changed. Keys then keep working on the table.
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+            this.focus_table_or_root(window, cx);
+        });
         let SavedState {
             sidebar_collapsed,
             context: saved_context,
@@ -411,6 +423,7 @@ impl Root {
             pending: None,
             palette: None,
             sheet: None,
+            return_focus: None,
             focus_handle,
             session: Session::ChooseContext,
             sidebar_collapsed,
@@ -423,6 +436,7 @@ impl Root {
             _namespace_events: namespace_events,
             _appearance: appearance,
             _bounds: bounds,
+            _focus_lost: focus_lost,
         };
         root.pods.set_hidden_columns(&hidden_columns, cx);
         root.set_namespace(namespace, window, cx);
@@ -433,6 +447,16 @@ impl Root {
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus_handle.focus(window, cx);
+    }
+
+    /// Focuses the table if it shows, so a screen reader reads its selected row, and
+    /// otherwise the window, where the keys still work.
+    fn focus_table_or_root(&self, window: &mut Window, cx: &mut App) {
+        if self.notice(cx).is_none() {
+            self.panel().table_focus(cx).focus(window, cx);
+        } else {
+            self.focus(window, cx);
+        }
     }
 
     fn panel_for(&self, view: View) -> &dyn Panel {
@@ -900,7 +924,7 @@ impl Root {
     /// row if nothing is selected.
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.panel().has_selection(cx) {
-            self.move_selection(1, cx);
+            self.move_selection(1, window, cx);
             return;
         }
         match self.panel().selected_jump(cx) {
@@ -1154,33 +1178,46 @@ impl Root {
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.return_focus = window.focused(cx);
         let palette = cx.new(|cx| CommandState::new(window, cx));
         palette.update(cx, |palette, cx| palette.focus(window, cx));
         self.palette = Some(palette);
-        self.sheet = None;
+        cx.notify();
+    }
+
+    /// Opens a sheet over the panel. Focus moves to the window, so `Esc` closes it.
+    fn open_sheet(&mut self, sheet: Sheet, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.return_focus = window.focused(cx);
+        self.sheet = Some(sheet);
+        self.focus(window, cx);
         cx.notify();
     }
 
     /// Runs after a palette command, which may itself have opened a sheet or moved focus.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
-            self.focus_handle.focus(window, cx);
+            self.return_focus(window, cx);
             cx.notify();
         }
     }
 
+    /// Closes an open palette or sheet, and returns focus to where it was before. With
+    /// neither open, focus stays where it is, such as on the log timeline.
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
-        self.sheet = None;
-        self.focus_handle.focus(window, cx);
-        cx.notify();
+        let palette = self.palette.take();
+        let sheet = self.sheet.take();
+        if palette.is_some() || sheet.is_some() {
+            self.return_focus(window, cx);
+            cx.notify();
+        }
     }
 
-    /// Closes an open palette or sheet, and otherwise leaves focus where it is, such as on
-    /// the log timeline.
-    fn close_overlays_keeping_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.sheet.is_some() {
-            self.close_overlays(window, cx);
+    fn return_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.return_focus.take() {
+            Some(focus) => focus.focus(window, cx),
+            None => self.focus_table_or_root(window, cx),
         }
     }
 
@@ -1206,16 +1243,29 @@ impl Root {
         cx.notify();
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    /// Moves the selection and opens its details. From the window, focus moves to the table,
+    /// so a screen reader reads the row selected.
+    fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel().move_selection(delta, cx) {
             self.open_details(cx);
+            if self.focus_handle.is_focused(window) {
+                self.panel().table_focus(cx).focus(window, cx);
+            }
         }
+    }
+
+    /// The rows `Page Up` and `Page Down` move by: one fewer than the table shows, so the
+    /// row selected stays in view.
+    fn page(&self, cx: &App) -> isize {
+        self.panel().page_rows(cx).saturating_sub(1).max(1) as isize
     }
 
     /// Selects a row as a click would.
     #[cfg(feature = "preview")]
     pub(crate) fn select_first_row(&mut self, cx: &mut Context<Self>) {
-        self.move_selection(1, cx);
+        if self.panel().move_selection(1, cx) {
+            self.open_details(cx);
+        }
     }
 
     fn log_targets(&self, cx: &App) -> Vec<LogTarget> {
@@ -1602,6 +1652,11 @@ impl Root {
             has_tail: self.logs.is_some(),
             connected: self.connection.is_some(),
             back: self.history.last().map(|place| place.label.clone()),
+            selector: self.panel().selector(cx).map(|selector| selector.label),
+            sort: match self.notice(cx) {
+                None => self.panel().sort_commands(cx),
+                Some(_) => Vec::new(),
+            },
         }
     }
 
@@ -1625,7 +1680,13 @@ impl Root {
         for group in entries {
             command = command.group(group);
         }
-        render_overlay(PALETTE_WIDTH, command.into_any_element(), cx)
+        let palette = div()
+            .id("palette")
+            .test_support()
+            .role(Role::Dialog)
+            .aria_label("Command palette")
+            .child(command);
+        render_overlay(PALETTE_WIDTH, palette.into_any_element(), cx)
     }
 
     fn render_connection(&self, cx: &App) -> impl IntoElement + use<> {
@@ -1725,6 +1786,7 @@ impl Root {
                     h_flex()
                         .id("cluster-wide")
                         .test_support()
+                        .role(Role::Label)
                         .aria_label(format!(
                             "{} are cluster-wide, so the namespace does not apply",
                             view.name()
@@ -1893,6 +1955,7 @@ fn render_context_namespace_note(note: String, cx: &App) -> impl IntoElement + u
     div()
         .id("context-namespace-note")
         .test_support()
+        .role(Role::Label)
         .aria_label(note.clone())
         .flex_shrink_0()
         .px_3()
@@ -1907,6 +1970,7 @@ fn render_selector_chip(label: String, cx: &App) -> impl IntoElement + use<> {
     h_flex()
         .id("selector-filter")
         .test_support()
+        .role(Role::Group)
         .aria_label(format!("Showing pods of {label}"))
         .flex_shrink_1()
         .min_w_0()
@@ -1957,7 +2021,7 @@ fn log_controls(window: &mut Window, cx: &mut Context<Root>) -> (LogControls, [S
         window,
         |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Change => this.apply_log_filter(cx),
-            InputEvent::PressEnter { .. } => this.focus_handle.focus(window, cx),
+            InputEvent::PressEnter { .. } => this.focus_table_or_root(window, cx),
             _ => {}
         },
     );
@@ -2025,6 +2089,7 @@ fn render_log_note(note: SharedString, cx: &App) -> impl IntoElement + use<> {
             div()
                 .id("log-summary")
                 .test_support()
+                .role(Role::Status)
                 .aria_label(note.clone())
                 .flex_1()
                 .min_w_0()
@@ -2100,8 +2165,30 @@ impl Render for Root {
             .relative()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(|this, _: &NextRow, _, cx| this.move_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.move_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextRow, window, cx| {
+                this.move_selection(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousRow, window, cx| {
+                this.move_selection(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FirstRow, window, cx| {
+                this.move_selection(-isize::MAX, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LastRow, window, cx| {
+                this.move_selection(isize::MAX, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextPage, window, cx| {
+                let page = this.page(cx);
+                this.move_selection(page, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousPage, window, cx| {
+                let page = this.page(cx);
+                this.move_selection(-page, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| {
+                window.focus_prev(cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseDetails, window, cx| {
                 if this.sheet.is_some() {
                     this.close_overlays(window, cx);
@@ -2114,14 +2201,14 @@ impl Render for Root {
             }))
             .on_action(cx.listener(|this, _: &ClearFilter, window, cx| {
                 if this.filter.read(cx).value().is_empty() {
-                    this.focus_handle.focus(window, cx);
+                    this.focus_table_or_root(window, cx);
                 } else {
                     this.clear_filter(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ClearLogFilter, window, cx| {
                 if this.log_controls.query.read(cx).value().is_empty() {
-                    this.focus_handle.focus(window, cx);
+                    this.focus_table_or_root(window, cx);
                 } else {
                     this.clear_log_filter(false, window, cx);
                 }
@@ -2144,7 +2231,7 @@ impl Render for Root {
                 }
             }))
             .on_action(cx.listener(|this, _: &FollowSelected, window, cx| {
-                this.close_overlays_keeping_focus(window, cx);
+                this.close_overlays(window, cx);
                 if let Some(jump) = this.panel().selected_jump(cx) {
                     this.jump(jump, window, cx);
                 }
@@ -2153,12 +2240,10 @@ impl Render for Root {
                 this.open_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
-                this.close_overlays(window, cx);
-                this.sheet = Some(Sheet::Shortcuts);
+                this.open_sheet(Sheet::Shortcuts, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ShowAbout, window, cx| {
-                this.close_overlays(window, cx);
-                this.sheet = Some(Sheet::About);
+                this.open_sheet(Sheet::About, window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
                 this.close_overlays(window, cx);
@@ -2195,25 +2280,25 @@ impl Render for Root {
                 }
             }))
             .on_action(cx.listener(|this, _: &NextError, window, cx| {
-                this.close_overlays_keeping_focus(window, cx);
+                this.close_overlays(window, cx);
                 if let Some(logs) = &this.logs {
                     logs.update(cx, |logs, cx| logs.jump_to_error(true, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &PreviousError, window, cx| {
-                this.close_overlays_keeping_focus(window, cx);
+                this.close_overlays(window, cx);
                 if let Some(logs) = &this.logs {
                     logs.update(cx, |logs, cx| logs.jump_to_error(false, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyLines, window, cx| {
-                this.close_overlays_keeping_focus(window, cx);
+                this.close_overlays(window, cx);
                 if let Some(logs) = &this.logs {
                     logs.update(cx, |logs, cx| logs.copy_selection(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ExportLines, window, cx| {
-                this.close_overlays_keeping_focus(window, cx);
+                this.close_overlays(window, cx);
                 if let Some(logs) = &this.logs {
                     logs.update(cx, |logs, cx| logs.export_lines(cx));
                 }
@@ -2256,6 +2341,11 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowPods, window, cx| {
                 this.close_overlays(window, cx);
                 this.show_workload_pods(window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &SortBy, window, cx| {
+                this.close_overlays(window, cx);
+                this.panel().cycle_sort(action.column, cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ClearSelector, _, cx| {
                 this.panel().set_selector(None, cx);
@@ -5363,5 +5453,337 @@ users:
         press(handle, "5", cx);
         wait_for_notice(handle, "You can't list Jobs across all namespaces", cx).await;
         assert_eq!(locked_views(&root, cx), [View::Jobs]);
+    }
+
+    /// The rows of the table, as a screen reader finds them, without the header row.
+    fn table_rows(window: &gpui_kit::Window) -> Vec<gpui_kit::test::ElementSnapshot> {
+        window
+            .find_all_by_role(gpui_kit::Role::Row)
+            .into_iter()
+            .filter(|row| row.selected().is_some())
+            .collect()
+    }
+
+    fn selected_row_label(window: &gpui_kit::Window) -> Option<String> {
+        table_rows(window)
+            .into_iter()
+            .find(|row| row.selected() == Some(true))
+            .and_then(|row| row.label().map(str::to_owned))
+    }
+
+    #[gpui_kit::test]
+    async fn the_selected_row_reads_as_selected_and_takes_focus(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(selected_row_label(window), None);
+            assert_eq!(window.find("table").role(), Some(gpui_kit::Role::Table));
+            assert_eq!(window.find("table").label(), Some("Pods"));
+        })
+        .unwrap();
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            let label = selected_row_label(window).unwrap();
+            assert!(
+                label.starts_with("api-1, Namespace shop, Status Running"),
+                "{label}"
+            );
+            assert_eq!(
+                table_rows(window)
+                    .iter()
+                    .filter(|row| row.selected() == Some(true))
+                    .count(),
+                1
+            );
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+
+        press(handle, "y", cx);
+        cx.update_window(handle, |_, window, _| {
+            let tabs: Vec<_> = window
+                .find_all_by_role(gpui_kit::Role::Tab)
+                .iter()
+                .map(|tab| (tab.label().unwrap_or_default().to_owned(), tab.selected()))
+                .collect();
+            assert_eq!(tabs.len(), 3, "{tabs:?}");
+            assert_eq!(tabs[0], ("Summary".to_owned(), Some(false)));
+            assert_eq!(tabs[2], ("YAML".to_owned(), Some(true)));
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+
+        press(handle, "down", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert!(selected_row_label(window).unwrap().starts_with("front-1"));
+            assert_eq!(window.find("details-title").label(), Some("front-1"));
+        })
+        .unwrap();
+        press(handle, "home", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert!(selected_row_label(window).unwrap().starts_with("api-1"));
+        })
+        .unwrap();
+        press(handle, "end", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert!(selected_row_label(window).unwrap().starts_with("front-1"));
+        })
+        .unwrap();
+
+        // Left and right would select a column of GPUI Kit's table.
+        press(handle, "left", cx);
+        press(handle, "escape", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(selected_row_label(window), None);
+            assert!(window.try_find("details").is_none());
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_clicked_row_reads_as_selected(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("row", 1usize), cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(selected_row_label(window).unwrap().starts_with("front-1"));
+            assert_eq!(window.find("details-title").label(), Some("front-1"));
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_selection_stays_marked_as_rows_move(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+        press(handle, "end", cx);
+        cx.update_window(handle, |_, window, cx| {
+            assert!(selected_row_label(window).unwrap().starts_with("front-1"));
+            window.dispatch_action(Box::new(super::SortBy { column: "Name" }), cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_action(Box::new(super::SortBy { column: "Name" }), cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let rows = table_rows(window);
+            assert!(rows[0].label().unwrap().starts_with("front-1"));
+            assert_eq!(rows[0].selected(), Some(true));
+            assert_eq!(rows[1].selected(), Some(false));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_palette_sorts_by_each_column(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("palette").role(), Some(gpui_kit::Role::Dialog));
+            window.input("sort by status", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(palette_options(window), ["Sort by Status"]);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            window.input("sort", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let options = palette_options(window);
+            assert!(options.contains(&"Sort by Status, descending".to_owned()));
+            assert!(options.contains(&"Sort by Name".to_owned()));
+        })
+        .unwrap();
+    }
+
+    fn palette_options(window: &gpui_kit::Window) -> Vec<String> {
+        window
+            .find_all_by_role(gpui_kit::Role::ListBoxOption)
+            .iter()
+            .filter_map(|option| option.label().map(str::to_owned))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    async fn tab_leaves_the_table_and_closing_the_palette_returns_to_it(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+        press(handle, "j", cx);
+
+        cx.update_window(handle, |_, window, cx| {
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            assert_ne!(window.find("table").focused(), Some(true));
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_none());
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+
+        press(handle, "?", cx);
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(
+                window.find(("shortcut", 0usize)).label(),
+                Some(
+                    format!(
+                        "{}: Open the command palette",
+                        super::super::palette::SHORTCUTS[0].0
+                    )
+                    .as_str()
+                )
+            );
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("overlay").is_none());
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+
+        press(handle, "tab", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_ne!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+        press(handle, "shift-tab", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn closing_the_details_from_a_link_returns_focus_to_the_table(cx: &mut TestAppContext) {
+        let (handle, _) = open_links(Vec::new(), cx).await;
+
+        let mut focused = false;
+        for _ in 0..40 {
+            press(handle, "tab", cx);
+            focused = cx
+                .update_window(handle, |_, window, _| {
+                    window.find_by_label("Go to deployment/api").focused() == Some(true)
+                })
+                .unwrap();
+            if focused {
+                break;
+            }
+        }
+        assert!(focused, "Tab never reached the link");
+        press(handle, "escape", cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("details").is_none());
+            assert_eq!(window.find("table").focused(), Some(true));
+        })
+        .unwrap();
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert!(selected_row_label(window).is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_filter_takes_composed_text(cx: &mut TestAppContext) {
+        let (handle, root) = open_root(
+            Contexts::from_yaml(&kubeconfig(&serve_pods(TWO_NAMESPACES_BODY), "dev")),
+            cx,
+        );
+        cx.executor().allow_parking();
+        wait_for_pods(handle, cx).await;
+        press(handle, "/", cx);
+        let filter = root.read_with(cx, |root, _| root.filter.clone());
+
+        cx.update_window(handle, |_, window, cx| {
+            let bounds = window.find("pod-filter").bounds();
+            let handler = gpui_kit::ElementInputHandler::new(bounds, filter.clone());
+            let mut input = gpui_kit::test::TestInput::new(handler, window);
+            // An IME marks text while it composes, then commits it.
+            input.compose_text(None, "ｆｒ", Some(0..2), cx);
+            assert_eq!(input.marked_text_range(cx), Some(0..2));
+            input.compose_text(None, "fr", Some(0..2), cx);
+            input.unmark_text(cx);
+            assert_eq!(input.marked_text_range(cx), None);
+            input.commit_text("ont", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find_all_by_label("api-1").is_empty());
+            assert_eq!(window.find_all_by_label("front-1").len(), 1);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn log_lines_are_options_of_a_list(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tail-logs", cx);
+        })
+        .unwrap();
+        wait_for_label(handle, "api-1/app 2026-01-01T00:00:00Z first line", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find("log-lines").role(),
+                Some(gpui_kit::Role::ListBox)
+            );
+            let line = window.find_by_label("api-1/app 2026-01-01T00:00:00Z first line");
+            assert_eq!(line.role(), Some(gpui_kit::Role::ListBoxOption));
+            assert_eq!(line.selected(), Some(false));
+            assert_eq!(
+                window.find("log-timeline").role(),
+                Some(gpui_kit::Role::ListBox)
+            );
+            assert_eq!(
+                window.find("log-summary").role(),
+                Some(gpui_kit::Role::Status)
+            );
+            assert_eq!(
+                window.find_by_label("Export lines").role(),
+                Some(gpui_kit::Role::Button)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn labelled_text_reaches_the_accessibility_tree(cx: &mut TestAppContext) {
+        let handle = connected(cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // A label without a role never reaches the platform's tree.
+            for element in window.elements() {
+                if element.label().is_some() {
+                    assert!(element.role().is_some(), "{:?} has no role", element.path());
+                }
+            }
+            assert_eq!(
+                window.find("resource-tree").role(),
+                Some(gpui_kit::Role::Tree)
+            );
+        })
+        .unwrap();
     }
 }

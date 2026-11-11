@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::table::{DataTable, TableEvent, TableState};
+use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
@@ -17,7 +17,10 @@ use taffrail_core::{
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
 use crate::root::{Notice, Root, no_rows_notice};
-use crate::table::{Jump, PodCounts, ResourceTable, SelectorFilter, column_names, show_in_place};
+use crate::table::{
+    Jump, PodCounts, ResourceTable, RowClicked, SelectorFilter, SortOrder, change, column_names,
+    show_in_place,
+};
 
 /// A resource view, in sidebar order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,6 +182,13 @@ pub trait Panel {
     fn table(&self) -> AnyElement;
     /// Whether keyboard focus is on the table.
     fn table_focused(&self, window: &Window, cx: &App) -> bool;
+    fn table_focus(&self, cx: &App) -> FocusHandle;
+    /// How many rows the table shows at once, for `Page Up` and `Page Down`.
+    fn page_rows(&self, cx: &App) -> usize;
+    /// Each shown column, and what sorting by it does next, such as `Sort by Age, descending`.
+    fn sort_commands(&self, cx: &App) -> Vec<(&'static str, String)>;
+    /// Sorts by a column as clicking its header does.
+    fn cycle_sort(&self, column: &str, cx: &mut App);
 
     fn set_filter(&self, filter: String, cx: &mut App);
     fn set_selector(&self, selector: Option<SelectorFilter>, cx: &mut App);
@@ -257,13 +267,10 @@ impl<R: Inspect> ResourcePanel<R> {
                 .col_resizable(false)
                 .row_selectable(false)
         });
-        let table_events =
-            cx.subscribe_in(&table, window, |root, _, event: &TableEvent, window, cx| {
-                if matches!(event, TableEvent::SelectRow(_)) {
-                    root.focus(window, cx);
-                    root.open_details(cx);
-                }
-            });
+        // A click focuses the table itself, so a screen reader reads the selected row.
+        let table_events = cx.subscribe(&table, |root, _, _: &RowClicked, cx| {
+            root.open_details(cx);
+        });
         Self {
             view,
             table,
@@ -281,10 +288,7 @@ impl<R: Inspect> ResourcePanel<R> {
     }
 
     fn update_table(&self, cx: &mut App, update: impl FnOnce(&mut ResourceTable<R>)) {
-        self.table.update(cx, |table, cx| {
-            update(table.delegate_mut());
-            cx.notify();
-        });
+        self.table.update(cx, |table, cx| change(table, cx, update));
     }
 
     fn scroll_to_selection(&self, cx: &mut App) {
@@ -337,6 +341,42 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
         self.table.focus_handle(cx).is_focused(window)
     }
 
+    fn table_focus(&self, cx: &App) -> FocusHandle {
+        self.table.focus_handle(cx)
+    }
+
+    fn page_rows(&self, cx: &App) -> usize {
+        self.table.read(cx).visible_range().rows().len()
+    }
+
+    fn sort_commands(&self, cx: &App) -> Vec<(&'static str, String)> {
+        let table = self.table.read(cx).delegate();
+        let hidden = table.hidden_columns();
+        column_names::<R>()
+            .enumerate()
+            .filter(|(_, name)| !hidden.contains(name))
+            .map(|(col_ix, name)| {
+                let label = match table.sort {
+                    Some((sorted, SortOrder::Ascending)) if sorted == col_ix => {
+                        format!("Sort by {name}, descending")
+                    }
+                    Some((sorted, SortOrder::Descending)) if sorted == col_ix => {
+                        "Sort in the default order".to_owned()
+                    }
+                    _ => format!("Sort by {name}"),
+                };
+                (name, label)
+            })
+            .collect()
+    }
+
+    fn cycle_sort(&self, column: &str, cx: &mut App) {
+        let Some(col_ix) = column_names::<R>().position(|name| name == column) else {
+            return;
+        };
+        self.update_table(cx, |table| table.cycle_sort(col_ix));
+    }
+
     fn set_filter(&self, filter: String, cx: &mut App) {
         self.update_table(cx, |table| table.set_filter(filter));
     }
@@ -371,28 +411,26 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
 
     fn set_hidden_columns(&self, names: &[String], cx: &mut App) {
         self.table.update(cx, |table, cx| {
-            table.delegate_mut().set_hidden_columns(names);
+            change(table, cx, |table| table.set_hidden_columns(names));
             table.refresh(cx);
-            cx.notify();
         });
     }
 
     fn move_selection(&self, delta: isize, cx: &mut App) -> bool {
         self.table.update(cx, |table, cx| {
-            let moved = table.delegate_mut().move_selection(delta);
+            let moved = change(table, cx, |table| table.move_selection(delta));
             if let Some(row_ix) = moved {
                 table
                     .vertical_scroll_handle
                     .scroll_to_item(row_ix, ScrollStrategy::Nearest);
             }
-            cx.notify();
             moved.is_some()
         })
     }
 
     fn select(&self, key: ObjectKey, cx: &mut App) -> bool {
-        let shown = self.table.update(cx, |table, _| {
-            table.delegate_mut().select_key(key).is_some()
+        let shown = self.table.update(cx, |table, cx| {
+            change(table, cx, |table| table.select_key(key)).is_some()
         });
         self.scroll_to_selection(cx);
         shown

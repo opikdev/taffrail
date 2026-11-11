@@ -50,7 +50,7 @@ Every resource view shows the same table, so what follows holds for each of them
 - Filters hide rows but keep the selection, so the details panel stays open on a pod the filter hides.
 - **Columns** opens a menu with a check for each column. **Name** always shows. Hiding the sorted column returns to the default order.
 - Below 920 px of window width, the panel header drops **Workloads /**, **Columns** shows only its icon, and the filter narrows, so the header fits the 760 px minimum.
-- Clicking a header sorts by that column, then reverses it, then returns to the default order. Only the sorted column shows an arrow.
+- Clicking a header sorts by that column, then reverses it, then returns to the default order. Only the sorted column shows an arrow. The palette does the same from the keyboard, with **Sort by Age**, then **Sort by Age, descending**, then **Sort in the default order**.
 - Rows are virtual, and update in place without moving the selection, because a selection belongs to the pod and not to a position.
 - Once you have scrolled, the row at the top of the view stays there while others move around it. At the very top of the list, new rows appear.
 - **Tail first 50 pods** follows the rows as shown, so sorting decides which pods are tailed.
@@ -157,12 +157,14 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `/` | Filter the current view |
 | `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |
+| `Home` / `End` | Select the first or last row |
+| `Page Up` / `Page Down` | Move the selection a page of rows |
 | `Enter` | Open details. On a selected namespace, choose it. On a selected event, go to its object |
 | `l` | Tail logs for the selection |
 | `w` | Tail the selected pod's workload, or the selected workload's pods |
 | `p` | Show the selected workload's or node's pods |
 | `⌘[ / `Alt+←` | Go back after following a link or **Show its pods** |
-| `Tab` / `Shift+Tab` | Move to the next or previous control, out of the table and into the details panel's links |
+| `Tab` / `Shift+Tab` | Move to the next or previous control, out of the table and into the details panel's links. Moving the selection with `j`, `k` or a click puts focus on the table |
 | `s` | Show the summary |
 | `y` | Show YAML |
 | `e` | Show events |
@@ -171,7 +173,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `←` `→` | Move between bars, when the timeline has focus |
 | `↑` `↓`, `Shift+↑` `Shift+↓` | Select log lines, when the lines have focus |
 | `⌘C` / `Ctrl+C` | Copy the selected log lines |
-| `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it. In the log lines, clear the selection |
+| `Esc` | Clear the filter, then close the panel. In the log filter, clear it, then leave it. In the log lines, clear the selection. In the palette or a sheet, close it and return focus to where it was |
 | `?` | Show all shortcuts |
 
 ## Command palette
@@ -179,9 +181,9 @@ Every action works from the keyboard. Single-letter keys work when no text field
 - `⌘K`, or the search field in the title bar, opens the palette over the panel.
 - Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Text with a selector operator, such as `=`, `!=`, `in` or `!`, also offers to tail the pods it matches. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
 - Choosing a pod selects it and opens its details. If the filter or namespace hid it, both clear first.
-- Below the pods, the palette lists the commands that apply now, including **Go to** each view, such as **Go to Deployments**, then contexts and namespaces, with a check on the current ones.
+- Below the pods, the palette lists the commands that apply now, including **Sort by** each shown column, **Show all pods** while a workload's or node's pods narrow the table, and **Go to** each view, such as **Go to Deployments**, then contexts and namespaces, with a check on the current ones.
 - Every command dispatches the same action as its key or button.
-- `Esc` clears the search, then closes the palette.
+- `Esc` clears the search, then closes the palette, and focus returns to where it was.
 - `?` opens the list of shortcuts, which `Esc` closes.
 
 ## States
@@ -250,3 +252,29 @@ The source is `crates/ui/assets/icon/icon.svg`. After changing it, run `scripts/
 - Tab reaches every panel, and focus never gets trapped in a table.
 - Respect the system's reduced motion and contrast settings.
 - Test keyboard reach and screen reader labels at each milestone.
+
+### Keyboard and focus
+
+- Every action works without a mouse, through a key, a palette command, or a control that `Tab` reaches. Sorting by a column, which a header click does, is in the palette.
+- The table takes focus when you move its selection, so the arrow keys, `Home`, `End`, `Page Up` and `Page Down` keep moving it, and `Tab` leaves it for the next control.
+- When what had focus goes away, such as a link in a details panel that closed, focus moves to the table, or to the window when no table shows. Closing the palette or a sheet returns focus to where it was.
+- `Esc` in a filter clears it, then leaves it for the table.
+- Text fields are GPUI Kit inputs, so an input method can compose text in them, and no single-letter key acts while one has focus.
+
+### Screen readers
+
+GPUI reports an element to the platform's accessibility tree only when it has both an ID and a role. A label on an element without a role, or plain text, never reaches a screen reader, so anything that only shows text needs a role and a label.
+
+| Part | Reads as |
+|---|---|
+| Sidebar | A tree named **Resources**. Each item reads its name with its count, such as **Pods, 412**, or **no permission**, or **not available yet** for resources without a view |
+| Resource table | A table named after its view. Each row is selected or not, and reads its cells by column, such as **api-7f9c, Namespace shop, Status Running**. While the table has focus, the selected row is the focused node |
+| Status | A word in every status cell, the connection footer and the log severity column, never colour alone |
+| Details panel | A complementary region, such as **Pod details**, with the object's name as a heading, tabs that say which is selected, and links named **Go to deployment/api** |
+| Filters | Text fields named **Filter pods** and **Filter log lines**, and pickers named **Namespace**, **Severity** and **Lines around each match** |
+| Palette and sheets | Dialogs named **Command palette**, **Keyboard shortcuts** and **About Taffrail**. Palette entries are options that say which is highlighted |
+| Log lines | A list named **Log lines**, whose lines read their source, severity and text, and say whether they are selected. While the lines have focus, the line the arrows move from is the focused node |
+| Timeline | A horizontal list that reads its span, such as **Timeline from 10:32 to 10:42, 5 s per bar**, whose bars read their time and counts |
+| Notices and counts | Headings for notices, and status text for the log summary and the count of matching lines |
+
+Tests check roles, labels and selected states through GPUI Kit's test queries, which read the same properties GPUI gives the platform. They can't run a screen reader, so each release still needs a person to check it with VoiceOver, Narrator or Orca.
