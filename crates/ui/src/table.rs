@@ -314,6 +314,7 @@ impl<R: TableRow> ResourceTable<R> {
 
     fn rebuild(&mut self) {
         let selector = self.selector.as_ref().map(|filter| &filter.selector);
+        let filter = self.filter.to_lowercase();
         self.rows = self
             .snapshot
             .rows
@@ -326,7 +327,7 @@ impl<R: TableRow> ResourceTable<R> {
                 let selected = selector.is_none_or(|selector| {
                     row.labels().is_some_and(|labels| selector.matches(labels))
                 });
-                in_namespace && selected && row.matches(&self.filter)
+                in_namespace && selected && row.matches(&filter)
             })
             .cloned()
             .collect();

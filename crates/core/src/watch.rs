@@ -48,11 +48,14 @@ pub trait Row: Clone + Debug + PartialEq + Send + Sync + 'static {
         (self.namespace().to_owned(), self.name().to_owned())
     }
 
-    /// Whether `filter` appears in `namespace/name`, ignoring case.
+    /// Whether `filter`, already in lowercase, appears in `namespace/name`, ignoring case.
+    /// An empty filter matches without allocating, because views rebuild their rows on
+    /// every snapshot.
     fn matches(&self, filter: &str) -> bool {
-        format!("{}/{}", self.namespace(), self.name())
-            .to_lowercase()
-            .contains(&filter.to_lowercase())
+        filter.is_empty()
+            || format!("{}/{}", self.namespace(), self.name())
+                .to_lowercase()
+                .contains(filter)
     }
 }
 
