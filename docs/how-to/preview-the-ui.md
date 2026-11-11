@@ -47,6 +47,8 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 | `statefulset-details-dark.png`, `statefulset-details-light.png` | An unavailable StatefulSet's details |
 | `daemonsets-dark.png`, `daemonsets-light.png` | The DaemonSets table, with a set that has no ready pod, a misscheduled one and one rolling out first |
 | `daemonset-details-dark.png`, `daemonset-details-light.png` | That DaemonSet's details, with its node selector and tolerations |
+| `jobs-dark.png`, `jobs-light.png` | The Jobs table, with failed Jobs and their reasons, then one retrying, first |
+| `job-details-dark.png`, `job-details-light.png` | A failed Job's details, with its backoff limit |
 | `no-permission-dark.png`, `no-permission-light.png` | The Deployments view when the API refuses to list Deployments, with the lock in the sidebar |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |

@@ -23,7 +23,7 @@ Each run scrolls a table three rows per frame while pods churn: the pod table on
 | `cpu_percent` | CPU time as a percentage of one core |
 | `wakeups_per_second` | Idle and interrupt wake-ups |
 
-Pass a duration in seconds to change the default of 20: `scripts/bench.sh 60`. For a cluster started with another `SIM_CLUSTER`, pass the same name: `SIM_CLUSTER=m3 scripts/bench.sh`.
+Pass a duration in seconds to change the default of 20: `scripts/bench.sh 60`. To measure one view's table alone, name it: `TAFFRAIL_BENCH_VIEW=Jobs scripts/bench.sh`. For a cluster started with another `SIM_CLUSTER`, pass the same name: `SIM_CLUSTER=m3 scripts/bench.sh`.
 
 ## Measure the log parser
 

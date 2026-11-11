@@ -88,8 +88,8 @@ pub struct TailSelector {
 pub const SHORTCUTS: [(&str, &str); 23] = [
     (MODIFIER_K, "Open the command palette"),
     (
-        "1 – 4",
-        "Go to Pods, Deployments, StatefulSets or DaemonSets",
+        "1 – 5",
+        "Go to Pods, Deployments, StatefulSets, DaemonSets or Jobs",
     ),
     ("/", "Filter the current view"),
     ("f", "Filter log lines"),

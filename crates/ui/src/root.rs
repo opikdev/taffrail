@@ -2274,6 +2274,9 @@ mod tests {
     const DAEMON_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"api","namespace":"shop"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
     const DAEMON_SET_LIST_BODY: &str = r#"{"kind":"DaemonSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api","resourceVersion":"1","generation":1},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux"},"containers":[{"name":"app"}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":2,"currentNumberScheduled":2,"numberReady":2,"updatedNumberScheduled":2,"numberAvailable":2,"numberMisscheduled":1}}]}"#;
     const DAEMON_SETS: &str = "/apis/apps/v1/daemonsets";
+    const JOB_BODY: &str = r#"{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"api","namespace":"shop","ownerReferences":[{"apiVersion":"batch/v1","kind":"CronJob","name":"nightly","uid":"c","controller":true}]},"spec":{"completions":2,"selector":{"matchLabels":{"app":"api"}},"template":{}},"status":{"active":1,"succeeded":1}}"#;
+    const JOB_LIST_BODY: &str = r#"{"kind":"JobList","apiVersion":"batch/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api","resourceVersion":"1","ownerReferences":[{"apiVersion":"batch/v1","kind":"CronJob","name":"nightly","uid":"c","controller":true}]},"spec":{"completions":2,"selector":{"matchLabels":{"app":"api"}},"template":{}},"status":{"startTime":"2026-01-01T00:00:00Z","active":1,"succeeded":1}}]}"#;
+    const JOBS: &str = "/apis/batch/v1/jobs";
 
     fn serve_pods(pod_list: &str) -> String {
         serve_pods_with_logs(pod_list, LOG_BODY)
@@ -4727,5 +4730,65 @@ users:
         )
         .await;
         assert_eq!(locked_views(&root, cx), [View::DaemonSets]);
+    }
+
+    fn serve_jobs(forbidden: Vec<&'static str>) -> String {
+        serve_workload("batch/v1", "jobs", JOB_LIST_BODY, JOB_BODY, forbidden)
+    }
+
+    #[gpui_kit::test]
+    async fn a_job_opens_its_details_and_shows_its_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_workloads(serve_jobs(Vec::new()), cx).await;
+        press(handle, "5", cx);
+        wait_for_label(handle, "Filter jobs", cx).await;
+        wait_for_label(handle, "api", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(window.find_all_by_label("Running").len(), 1);
+            assert_eq!(window.find_all_by_label("1/2").len(), 1);
+            assert_eq!(window.find_all_by_label("nightly").len(), 1);
+        })
+        .unwrap();
+
+        press(handle, "j", cx);
+        wait_for_label(handle, "cronjob/nightly", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details-title").label(), Some("api"));
+            assert_eq!(window.find("details").label(), Some("Job details"));
+            assert!(window.try_find("link cronjob/nightly").is_none());
+        })
+        .unwrap();
+
+        press(handle, "p", cx);
+        wait_for_label(handle, "api-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(
+                window.find("selector-filter").label(),
+                Some("Showing pods of job/api")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_w_key_follows_the_selected_jobs_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_workloads(serve_jobs(Vec::new()), cx).await;
+        press(handle, "5", cx);
+        wait_for_label(handle, "api", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "w", cx);
+
+        wait_for_log_summary(handle, "Following job/api", cx).await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_job_list_shows_no_permission(cx: &mut TestAppContext) {
+        let (handle, root) = open_workloads(serve_jobs(vec![JOBS]), cx).await;
+
+        press(handle, "5", cx);
+        wait_for_notice(handle, "You can't list Jobs across all namespaces", cx).await;
+        assert_eq!(locked_views(&root, cx), [View::Jobs]);
     }
 }

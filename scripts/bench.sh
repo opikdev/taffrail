@@ -41,6 +41,12 @@ run() {
   rollouts=""
 }
 
+# A view named in the environment is measured alone, such as TAFFRAIL_BENCH_VIEW=Jobs.
+if [ -n "${TAFFRAIL_BENCH_VIEW:-}" ]; then
+  run "scroll-$(printf '%s' "$TAFFRAIL_BENCH_VIEW" | tr '[:upper:]' '[:lower:]')" 0 "" "$TAFFRAIL_BENCH_VIEW"
+  exit
+fi
+
 run scroll-churn 0
 run scroll-churn-tail 1
 run scroll-churn-follow 1 app=sim-churn
