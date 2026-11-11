@@ -127,19 +127,32 @@ pub fn pairs_section(
 
 /// The Labels section, as `key=value` lines, or nothing without labels.
 pub fn labels_section(labels: &[(String, String)], cx: &App) -> Option<AnyElement> {
+    lines_section("Labels", key_values(labels), cx)
+}
+
+/// Each pair as `key=value`.
+pub fn key_values(pairs: &[(String, String)]) -> Vec<String> {
+    pairs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
+/// A titled list of muted, monospaced lines, or nothing without lines.
+pub fn lines_section(title: &'static str, lines: Vec<String>, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let mono = theme.mono_font_family.clone();
     let muted = theme.muted_foreground;
-    (!labels.is_empty()).then(|| {
+    (!lines.is_empty()).then(|| {
         v_flex()
             .gap_1()
-            .child(section_title("Labels", cx))
-            .children(labels.iter().map(|(key, value)| {
+            .child(section_title(title, cx))
+            .children(lines.into_iter().map(|line| {
                 div()
                     .text_xs()
                     .font_family(mono.clone())
                     .text_color(muted)
-                    .child(format!("{key}={value}"))
+                    .child(line)
             }))
             .into_any_element()
     })

@@ -2271,6 +2271,9 @@ mod tests {
     const STATEFUL_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"api","namespace":"shop"},"spec":{"serviceName":"api","selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
     const STATEFUL_SET_LIST_BODY: &str = r#"{"kind":"StatefulSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api","resourceVersion":"1","generation":1},"spec":{"replicas":1,"serviceName":"api","selector":{"matchLabels":{"app":"api"}},"template":{}},"status":{"observedGeneration":1,"replicas":1,"readyReplicas":1,"currentReplicas":1,"updatedReplicas":1,"currentRevision":"api-1","updateRevision":"api-1"}}]}"#;
     const STATEFUL_SETS: &str = "/apis/apps/v1/statefulsets";
+    const DAEMON_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"api","namespace":"shop"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
+    const DAEMON_SET_LIST_BODY: &str = r#"{"kind":"DaemonSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api","resourceVersion":"1","generation":1},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux"},"containers":[{"name":"app"}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":2,"currentNumberScheduled":2,"numberReady":2,"updatedNumberScheduled":2,"numberAvailable":2,"numberMisscheduled":1}}]}"#;
+    const DAEMON_SETS: &str = "/apis/apps/v1/daemonsets";
 
     fn serve_pods(pod_list: &str) -> String {
         serve_pods_with_logs(pod_list, LOG_BODY)
@@ -4656,5 +4659,73 @@ users:
         )
         .await;
         assert_eq!(locked_views(&root, cx), [View::StatefulSets]);
+    }
+
+    fn serve_daemon_sets(forbidden: Vec<&'static str>) -> String {
+        serve_workload(
+            "apps/v1",
+            "daemonsets",
+            DAEMON_SET_LIST_BODY,
+            DAEMON_SET_BODY,
+            forbidden,
+        )
+    }
+
+    #[gpui_kit::test]
+    async fn a_daemon_set_opens_its_details_and_shows_its_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_workloads(serve_daemon_sets(Vec::new()), cx).await;
+        press(handle, "4", cx);
+        wait_for_label(handle, "Filter daemonsets", cx).await;
+        wait_for_label(handle, "api", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(window.find_all_by_label("Misscheduled").len(), 1);
+            assert_eq!(window.find_all_by_label("kubernetes.io/os=linux").len(), 1);
+        })
+        .unwrap();
+
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details-title").label(), Some("api"));
+            assert_eq!(window.find("details").label(), Some("DaemonSet details"));
+        })
+        .unwrap();
+
+        press(handle, "p", cx);
+        wait_for_label(handle, "api-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(
+                window.find("selector-filter").label(),
+                Some("Showing pods of daemonset/api")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_l_key_follows_the_selected_daemon_sets_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_workloads(serve_daemon_sets(Vec::new()), cx).await;
+        press(handle, "4", cx);
+        wait_for_label(handle, "api", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "l", cx);
+
+        wait_for_log_summary(handle, "Following daemonset/api", cx).await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_daemon_set_list_shows_no_permission(cx: &mut TestAppContext) {
+        let (handle, root) = open_workloads(serve_daemon_sets(vec![DAEMON_SETS]), cx).await;
+
+        press(handle, "4", cx);
+        wait_for_notice(
+            handle,
+            "You can't list DaemonSets across all namespaces",
+            cx,
+        )
+        .await;
+        assert_eq!(locked_views(&root, cx), [View::DaemonSets]);
     }
 }

@@ -1,6 +1,7 @@
 //! Cluster state, watches and log storage. This crate never imports GPUI.
 
 mod cluster;
+mod daemonsets;
 mod deployments;
 mod details;
 mod environment;
@@ -20,6 +21,7 @@ mod watch;
 mod workload;
 
 pub use cluster::{Backend, ClusterError, Connection, Contexts};
+pub use daemonsets::{DaemonSetDetails, DaemonSetRow};
 pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
 pub use details::{ContainerDetails, ObjectDetails, ObjectEvent, PodDetails};
 pub use environment::use_login_shell_environment;
