@@ -53,6 +53,8 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 | `nodes-dark.png`, `nodes-light.png` | The Nodes table, with a node not ready, one under disk pressure and one cordoned first |
 | `node-details-dark.png`, `node-details-light.png` | A node that is not ready, with its details |
 | `no-permission-nodes-dark.png`, `no-permission-nodes-light.png` | The Nodes view when the API refuses to list nodes |
+| `namespaces-dark.png`, `namespaces-light.png` | The Namespaces table, with a terminating namespace first and pod counts |
+| `namespace-details-dark.png`, `namespace-details-light.png` | The terminating namespace's details, with the conditions that hold it |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
 
