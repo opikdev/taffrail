@@ -5,7 +5,7 @@ use gpui_kit::component::command::{CommandGroup, CommandItem};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{PodKey, PodRow, Row, Selector};
+use taffrail_core::{ObjectLink, PodKey, PodRow, Row, Selector};
 
 use crate::table::urgency;
 use crate::views::View;
@@ -40,6 +40,7 @@ actions!(
         CloseWindow,
         ShowPods,
         ClearSelector,
+        GoBack,
     ]
 );
 
@@ -69,6 +70,13 @@ pub struct OpenPod {
     pub key: PodKey,
 }
 
+/// Opens the view of a linked object's kind and selects the object.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = taffrail, no_json)]
+pub struct OpenLink {
+    pub link: ObjectLink,
+}
+
 /// Follows the pods that a label selector matches, in the chosen namespace.
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = taffrail, no_json)]
@@ -77,7 +85,7 @@ pub struct TailSelector {
 }
 
 /// Every key the app answers to, for the shortcut sheet.
-pub const SHORTCUTS: [(&str, &str); 22] = [
+pub const SHORTCUTS: [(&str, &str); 23] = [
     (MODIFIER_K, "Open the command palette"),
     ("1  2", "Go to Pods or Deployments"),
     ("/", "Filter the current view"),
@@ -87,6 +95,7 @@ pub const SHORTCUTS: [(&str, &str); 22] = [
     ("l", "Tail logs for the selection"),
     ("w", "Tail the selected workload"),
     ("p", "Show the selected workload's pods"),
+    (MODIFIER_BACK, "Go back after following a link"),
     ("y", "Show YAML"),
     ("e", "Show events"),
     ("s", "Show summary"),
@@ -106,6 +115,11 @@ const MODIFIER_K: &str = if cfg!(target_os = "macos") {
     "⌘K"
 } else {
     "Ctrl+K"
+};
+const MODIFIER_BACK: &str = if cfg!(target_os = "macos") {
+    "⌘["
+} else {
+    "Alt+←"
 };
 const MODIFIER_C: &str = if cfg!(target_os = "macos") {
     "⌘C"
@@ -148,6 +162,8 @@ pub struct PaletteSource<'a> {
     pub has_selection: bool,
     pub has_tail: bool,
     pub connected: bool,
+    /// Where **Back** returns to, such as `pod api-1`, after following a link.
+    pub back: Option<String>,
 }
 
 /// The selector a search spells, such as `app=api` or `tier in (web)`. A bare word
@@ -290,6 +306,15 @@ pub fn groups(source: PaletteSource) -> Vec<CommandGroup> {
             .item(command("Show summary", IconName::Info, ShowSummary))
             .item(command("Show events", IconName::Activity, ShowEvents))
             .item(command("Show YAML", IconName::FileText, ShowYaml));
+    }
+    if let Some(back) = source.back {
+        actions = actions.item(
+            CommandItem::new()
+                .label(format!("Back to {back}"))
+                .icon(Icon::new(IconName::ArrowLeft))
+                .keywords(["back", "return", "link"])
+                .action(Box::new(GoBack)),
+        );
     }
     for view in View::ALL {
         actions = actions.item(
