@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -508,6 +509,76 @@ impl Scene {
     }
 }
 
+/// What the app shows a simulated cluster's user, view by view, such as the limited user
+/// `scripts/sim-cluster.sh limited` makes. The kubeconfig holds that context alone, so a
+/// preview cannot reach any other cluster.
+fn simulated(directory: &Path, context: &str) {
+    assert!(context.starts_with("kwok-"), "only a simulated cluster");
+    let output = Command::new("kubectl")
+        .args(["config", "view", "--raw", "--minify", "--flatten"])
+        .arg(format!("--context={context}"))
+        .output()
+        .expect("failed to run kubectl");
+    assert!(output.status.success(), "no context {context}");
+    let kubeconfig = String::from_utf8(output.stdout).expect("kubeconfig is not UTF-8");
+    let notice = |title: &str| {
+        let title = title.to_owned();
+        move |window: &mut Window, _: &mut App| {
+            window.try_find("notice-title").is_some_and(|notice| {
+                notice
+                    .label()
+                    .is_some_and(|label| label.starts_with(&title))
+            })
+        }
+    };
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut scene = Scene::open(Contexts::from_yaml(&kubeconfig), mode);
+        scene.wait_until(notice("You can't list Pods"));
+        scene.save(directory, &format!("sim-pods-refused-{suffix}.png"));
+
+        let handle = scene.handle;
+        scene
+            .cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("notice-action", cx);
+            })
+            .expect("preview window closed");
+        scene.wait_until(|window, _| window.try_find("notice-title").is_none());
+        let root = scene.root.clone();
+        scene.cx.update(|cx| {
+            root.update(cx, |root, cx| {
+                root.select_first_row(cx);
+                root.tail_logs(cx);
+            })
+        });
+        scene.wait_until(|window, _| {
+            window.try_find("details-title").is_some()
+                && window
+                    .try_find("log-summary")
+                    .and_then(|summary| {
+                        summary
+                            .label()
+                            .map(|label| !label.ends_with(" 0 lines kept"))
+                    })
+                    .unwrap_or(false)
+        });
+        scene.save(directory, &format!("sim-pods-{suffix}.png"));
+        scene
+            .cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.within("details-tabs").click(1usize, cx);
+            })
+            .expect("preview window closed");
+        scene.save(directory, &format!("sim-events-refused-{suffix}.png"));
+
+        scene.show_view(View::Deployments);
+        scene.wait_until(notice("You can't list Deployments"));
+        scene.save(directory, &format!("sim-deployments-refused-{suffix}.png"));
+    }
+}
+
 /// The lines the log dock says it keeps.
 fn kept_lines(window: &Window) -> Option<usize> {
     window
@@ -548,9 +619,14 @@ fn tailing(server: &str, mode: ThemeMode) -> Scene {
     scene
 }
 
-/// Drives the real app through its main states and writes each one to `directory`.
+/// Drives the real app through its main states and writes each one to `directory`. With
+/// `TAFFRAIL_PREVIEW_CONTEXT`, it shows that simulated context instead.
 pub fn run(directory: PathBuf) {
     std::fs::create_dir_all(&directory).expect("failed to create preview directory");
+    if let Ok(context) = std::env::var("TAFFRAIL_PREVIEW_CONTEXT") {
+        simulated(&directory, &context);
+        return;
+    }
     let created = "2026-11-05T08:00:00Z";
     let server = serve(Fixture {
         pod_list: pod_list(created),
