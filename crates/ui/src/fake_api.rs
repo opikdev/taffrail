@@ -16,7 +16,8 @@ pub struct Fixture {
     /// When set, each log request streams these messages forever instead of `logs`, so tails
     /// stay open and their sources interleave.
     pub live_logs: Option<&'static [&'static str]>,
-    /// Objects read by exact path, such as a pod's ReplicaSet and Deployment.
+    /// Objects read by exact path, such as a pod's ReplicaSet and Deployment. An empty body
+    /// answers 404, as the API does for a kind the cluster does not serve.
     pub objects: Vec<(String, String)>,
     /// When set, a log request after a pod's first gets this in place of `logs`, as a log
     /// that rotated while the stream was down.
@@ -93,6 +94,15 @@ fn respond_forbidden(mut stream: &TcpStream, path: &str) {
     stream.write_all(response.as_bytes()).unwrap();
 }
 
+fn respond_not_found(mut stream: &TcpStream) {
+    let body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"the server could not find the requested resource","reason":"NotFound","code":404}"#;
+    let response = format!(
+        "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
 fn respond(mut stream: &TcpStream, body: &str) {
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -150,7 +160,10 @@ fn serve_request(
     } else if fixture.forbidden.contains(&path) {
         respond_forbidden(&stream, path);
     } else if let Some((_, body)) = fixture.objects.iter().find(|(object, _)| object == path) {
-        respond(&stream, body);
+        match body.as_str() {
+            "" => respond_not_found(&stream),
+            body => respond(&stream, body),
+        }
     } else if request_line.contains("/api/v1/pods") {
         respond(&stream, &fixture.pod_list);
     } else if request_line.contains("/log?") {

@@ -38,7 +38,7 @@ use crate::palette::{
 use crate::sidebar::{SidebarItem, resource_sidebar};
 use crate::table::{ALL_NAMESPACES, Jump, PodCounts, ResourceTable, SelectorFilter, TableRow};
 use crate::timeline::{LOG_TIMELINE_CONTEXT, TimelineNext, TimelinePrevious};
-use crate::views::{Panel, ResourcePanel, View, new_panel};
+use crate::views::{Panel, ResourcePanel, View, new_core_events_panel, new_panel};
 use crate::windows;
 
 type ContextPicker = SelectState<Vec<String>>;
@@ -293,6 +293,8 @@ pub struct Root {
     view: View,
     /// The view shown before this one, which choosing a namespace returns to.
     previous_view: View,
+    /// Whether the cluster lacks `events.k8s.io/v1`, so Events come from the core API.
+    core_events: bool,
     /// Hidden columns of views not yet opened, from saved state.
     saved_columns: std::collections::BTreeMap<String, Vec<String>>,
     filter: Entity<InputState>,
@@ -395,6 +397,7 @@ impl Root {
             panels: Vec::new(),
             view: View::Pods,
             previous_view: View::Pods,
+            core_events: false,
             saved_columns: view_columns,
             filter,
             namespace_picker,
@@ -541,6 +544,14 @@ impl Root {
         if view == View::Pods && self.view != View::Pods {
             self.update_pod_counts(cx);
         }
+        let not_served = matches!(
+            self.panel_for(view).status(cx).error,
+            Some(WatchError::NotServed { .. })
+        );
+        if view == View::Events && not_served && !self.core_events {
+            self.core_events = true;
+            cx.defer_in(window, |root, window, cx| root.use_core_events(window, cx));
+        }
         self.panel_for(view).update_details(cx);
         if self
             .pending
@@ -548,6 +559,22 @@ impl Root {
             .is_some_and(|pending| pending.view == view)
         {
             self.select_pending(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Replaces the Events panel with one over the core `v1` API.
+    fn use_core_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.panels.iter().position(|p| p.view() == View::Events) else {
+            return;
+        };
+        let panel = new_core_events_panel(window, cx);
+        panel.set_hidden_columns(&owned(self.panels[ix].hidden_columns(cx)), cx);
+        panel.set_namespace(self.namespace(cx), cx);
+        panel.set_filter(self.filter.read(cx).value().to_string(), cx);
+        self.panels[ix] = panel;
+        if self.view == View::Events {
+            self.start_view(View::Events, window, cx);
         }
         cx.notify();
     }
@@ -892,6 +919,7 @@ impl Root {
                 self.set_namespace(Some(namespace), window, cx);
                 self.show_view(if returns { back } else { View::Pods }, window, cx);
             }
+            Jump::Link(link) => self.open_link(link, window, cx),
         }
         self.remember_state(window, cx);
     }
@@ -4713,6 +4741,181 @@ users:
                 .map(|item| item.view)
                 .collect();
             assert_eq!(locked, [View::Namespaces]);
+        });
+    }
+
+    const EVENTS: &str = "/apis/events.k8s.io/v1/events";
+    const EVENT_LIST_BODY: &str = r#"{"kind":"EventList","apiVersion":"events.k8s.io/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"web","name":"front-2.1","resourceVersion":"1"},"eventTime":null,"deprecatedLastTimestamp":"2026-11-07T10:00:00Z","type":"Warning","reason":"BackOff","regarding":{"apiVersion":"v1","kind":"Pod","namespace":"web","name":"front-2"},"note":"Back-off restarting failed container app"},{"metadata":{"namespace":"web","name":"front-2.2","resourceVersion":"1"},"eventTime":null,"deprecatedLastTimestamp":"2026-11-07T10:05:00Z","type":"Normal","reason":"Pulled","regarding":{"apiVersion":"v1","kind":"Pod","namespace":"web","name":"front-2"},"note":"Pulled"},{"metadata":{"namespace":"default","name":"node-2.1","resourceVersion":"1"},"eventTime":null,"deprecatedLastTimestamp":"2026-11-07T10:06:00Z","type":"Warning","reason":"NodeNotReady","regarding":{"kind":"Node","name":"node-2"},"note":"Node node-2 status is now: NodeNotReady"},{"metadata":{"namespace":"web","name":"front.1","resourceVersion":"1"},"eventTime":null,"deprecatedLastTimestamp":"2026-11-07T10:01:00Z","type":"Normal","reason":"Synced","regarding":{"apiVersion":"v1","kind":"Service","namespace":"web","name":"front"},"note":"Synced"}]}"#;
+    const EVENT_BODY: &str = r#"{"kind":"Event","apiVersion":"events.k8s.io/v1","metadata":{"namespace":"web","name":"front.1","resourceVersion":"1"},"eventTime":null,"type":"Normal","reason":"Synced","regarding":{"kind":"Service","namespace":"web","name":"front"},"note":"Synced"}"#;
+    const CORE_EVENT_BODY: &str = r#"{"kind":"Event","apiVersion":"v1","metadata":{"namespace":"shop","name":"e1","resourceVersion":"1"},"involvedObject":{"kind":"Pod","name":"api-1"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container"}"#;
+
+    /// Pods on two nodes, the nodes, and `events` at the `events.k8s.io` path, where an
+    /// empty body answers 404. `forbidden` lists paths the API refuses.
+    async fn open_events(
+        events: &str,
+        forbidden: Vec<&'static str>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let server = serve(Fixture {
+            pod_list: PODS_ON_NODES_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![
+                (EVENTS.into(), events.into()),
+                (
+                    "/apis/events.k8s.io/v1/namespaces/web/events/front.1".into(),
+                    EVENT_BODY.into(),
+                ),
+                (
+                    "/api/v1/namespaces/shop/events/e1".into(),
+                    CORE_EVENT_BODY.into(),
+                ),
+                (NODES.into(), NODE_LIST_BODY.into()),
+                ("/api/v1/nodes/node-2".into(), NODE_BODY.into()),
+            ],
+        });
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_label(handle, "front-2", cx).await;
+        press(handle, "8", cx);
+        (handle, root)
+    }
+
+    #[gpui_kit::test]
+    async fn warnings_lead_the_events_view_newest_first(cx: &mut TestAppContext) {
+        let (handle, root) = open_events(EVENT_LIST_BODY, Vec::new(), cx).await;
+
+        wait_for_label(handle, "node/node-2", cx).await;
+        let rows = root.read_with(cx, |root, cx| {
+            let panel = root.panel();
+            (0..4)
+                .map(|row| panel.row_cells(row, cx)[1..5].to_vec())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            [
+                [
+                    "Warning",
+                    "NodeNotReady",
+                    "node/node-2",
+                    "Node node-2 status is now: NodeNotReady"
+                ],
+                [
+                    "Warning",
+                    "BackOff",
+                    "pod/front-2",
+                    "Back-off restarting failed container app"
+                ],
+                ["Normal", "Pulled", "pod/front-2", "Pulled"],
+                ["Normal", "Synced", "service/front", "Synced"],
+            ]
+        );
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find_all_by_label("Filter events").len(), 1);
+            assert!(window.try_find("namespace-picker").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn enter_on_an_event_goes_to_its_object(cx: &mut TestAppContext) {
+        let (handle, root) = open_events(EVENT_LIST_BODY, Vec::new(), cx).await;
+        set_namespace(handle, &root, "shop", cx);
+        set_namespace(handle, &root, "web", cx);
+        wait_for_label(handle, "pod/front-2", cx).await;
+
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details").label(), Some("Event details"));
+            assert_eq!(
+                window.find_by_label("Go to pod/front-2").role(),
+                Some(gpui_kit::Role::Link)
+            );
+        })
+        .unwrap();
+        press(handle, "enter", cx);
+
+        wait_for_label(handle, "Filter pods", cx).await;
+        wait_for_details(handle, "front-2", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details").label(), Some("Pod details"));
+            assert_eq!(
+                window.find("go-back").label(),
+                Some("Back to event front-2.1")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn an_event_about_a_node_opens_the_node(cx: &mut TestAppContext) {
+        let (handle, root) = open_events(EVENT_LIST_BODY, Vec::new(), cx).await;
+        set_namespace(handle, &root, "web", cx);
+        set_namespace(handle, &root, "default", cx);
+        wait_for_label(handle, "node/node-2", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "enter", cx);
+
+        wait_for_label(handle, "Filter nodes", cx).await;
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window
+                .try_find("details-title")
+                .is_some_and(|title| title.label() == Some("node-2"))
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn an_event_about_a_kind_without_a_view_stays(cx: &mut TestAppContext) {
+        let (handle, root) = open_events(EVENT_LIST_BODY, Vec::new(), cx).await;
+        wait_for_label(handle, "service/front", cx).await;
+
+        for _ in 0..4 {
+            press(handle, "j", cx);
+        }
+        press(handle, "enter", cx);
+
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find_by_label("Go to service/front").is_none());
+            assert!(window.try_find("text service/front").is_some());
+            assert_eq!(window.find_all_by_label("Filter events").len(), 1);
+        })
+        .unwrap();
+        root.read_with(cx, |root, _| assert_eq!(root.view, View::Events));
+    }
+
+    #[gpui_kit::test]
+    async fn without_events_k8s_io_the_core_api_lists_events(cx: &mut TestAppContext) {
+        let (handle, root) = open_events("", Vec::new(), cx).await;
+
+        wait_for_label(handle, "pod/api-1", cx).await;
+        root.read_with(cx, |root, _| assert!(root.core_events));
+        press(handle, "j", cx);
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find_by_label("Go to pod/api-1").is_some()
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_event_list_shows_no_permission(cx: &mut TestAppContext) {
+        let (handle, root) = open_events(EVENT_LIST_BODY, vec![EVENTS], cx).await;
+
+        wait_for_notice(handle, "You can't list Events across all namespaces", cx).await;
+        root.read_with(cx, |root, cx| {
+            let locked: Vec<_> = root
+                .sidebar_items(cx)
+                .into_iter()
+                .filter(|item| item.forbidden)
+                .map(|item| item.view)
+                .collect();
+            assert_eq!(locked, [View::Events]);
         });
     }
 

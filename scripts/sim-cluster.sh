@@ -9,6 +9,7 @@ deployments="${SIM_DEPLOYMENTS:-500}"
 statefulsets="${SIM_STATEFULSETS:-200}"
 daemonsets="${SIM_DAEMONSETS:-50}"
 jobs="${SIM_JOBS:-200}"
+events="${SIM_EVENTS:-5000}"
 log_rate="${SIM_LOG_RATE:-200}"
 limited_user="${SIM_LIMITED_USER:-jane}"
 limited_namespace="${SIM_LIMITED_NAMESPACE:-team-a}"
@@ -57,6 +58,7 @@ YAML
   add_statefulsets
   add_daemonsets
   add_jobs
+  add_events
 
   docker run -d --name "$generator" --network none \
     -v "$log_dir:$log_dir" -v "$root/scripts:/scripts:ro" python:3.13-alpine \
@@ -153,6 +155,22 @@ add_jobs() {
   local i
   for ((i = 0; i < jobs; i++)); do
     printf -- '---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: sim-job-%04d\nspec:\n  suspend: true\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n      - name: app\n        image: busybox\n' "$i"
+  done | k apply -f - >/dev/null
+}
+
+# Warning and Normal events about the simulated pods, on top of those the control plane
+# records, so the Events view has both types. The API server expires them after an hour.
+add_events() {
+  local i now type reason message
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for ((i = 0; i < events; i++)); do
+    if ((i % 3 == 0)); then
+      type=Warning reason=BackOff message="Back-off restarting failed container app in pod pod-$(printf %06d "$i")"
+    else
+      type=Normal reason=Pulled message="Container image busybox already present on machine"
+    fi
+    printf -- '---\napiVersion: v1\nkind: Event\nmetadata:\n  name: sim-event-%06d\n  namespace: default\ninvolvedObject:\n  apiVersion: v1\n  kind: Pod\n  namespace: default\n  name: pod-%06d\ntype: %s\nreason: %s\nmessage: %s\ncount: %d\nfirstTimestamp: %s\nlastTimestamp: %s\nsource:\n  component: kubelet\n' \
+      "$i" "$i" "$type" "$reason" "$message" "$((i % 40 + 1))" "$now" "$now"
   done | k apply -f - >/dev/null
 }
 

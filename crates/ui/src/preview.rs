@@ -365,6 +365,203 @@ fn namespace_objects(created: &str) -> Vec<(String, String)> {
     objects
 }
 
+/// An event as `(namespace, type, reason, kind, object, message, count, minutes ago)`.
+type SampleEvent = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    u32,
+    i64,
+);
+
+const EVENTS: [SampleEvent; 14] = [
+    (
+        "payments",
+        "Warning",
+        "BackOff",
+        "Pod",
+        "checkout-api-7f9c6d-h7vcd",
+        "Back-off restarting failed container app in pod checkout-api-7f9c6d-h7vcd_payments(3f1c9a7e-52ab-4b7e-9f55-0a0f6d1f1a11)",
+        41,
+        1,
+    ),
+    (
+        "payments",
+        "Warning",
+        "Unhealthy",
+        "Pod",
+        "checkout-api-7f9c6d-x2k9q",
+        "Readiness probe failed: Get 'http://10.4.3.22:8080/healthz': dial tcp 10.4.3.22:8080: connect: connection refused",
+        12,
+        2,
+    ),
+    (
+        "storefront",
+        "Warning",
+        "Failed",
+        "Pod",
+        "image-resizer-59c7d-m4tzp",
+        "Failed to pull image 'registry.example.com/image-resizer:2.31.1': not found",
+        6,
+        4,
+    ),
+    (
+        "default",
+        "Warning",
+        "NodeNotReady",
+        "Node",
+        "node-07",
+        "Node node-07 status is now: NodeNotReady",
+        1,
+        9,
+    ),
+    (
+        "payments",
+        "Warning",
+        "ProgressDeadlineExceeded",
+        "Deployment",
+        "checkout-api",
+        "ReplicaSet 'checkout-api-7f9c6d' has timed out progressing.",
+        1,
+        14,
+    ),
+    (
+        "storefront",
+        "Warning",
+        "FailedMount",
+        "Pod",
+        "search-indexer-7c6f9-qw8rn",
+        "MountVolume.SetUp failed for volume 'index-cache' : configmap 'search-indexer-cache' not found",
+        3,
+        22,
+    ),
+    (
+        "payments",
+        "Normal",
+        "Pulled",
+        "Pod",
+        "checkout-api-7f9c6d-h7vcd",
+        "Container image 'registry.example.com/checkout-api:2.31.0' already present on machine",
+        8,
+        1,
+    ),
+    (
+        "payments",
+        "Normal",
+        "ScalingReplicaSet",
+        "Deployment",
+        "checkout-api",
+        "Scaled up replica set checkout-api-7f9c6d from 3 to 6",
+        1,
+        3,
+    ),
+    (
+        "storefront",
+        "Normal",
+        "SuccessfulCreate",
+        "ReplicaSet",
+        "search-indexer-7c6f9",
+        "Created pod: search-indexer-7c6f9-wz2mf",
+        1,
+        5,
+    ),
+    (
+        "ingress",
+        "Normal",
+        "Sync",
+        "Ingress",
+        "storefront",
+        "Scheduled for sync",
+        4,
+        6,
+    ),
+    (
+        "storefront",
+        "Normal",
+        "Scheduled",
+        "Pod",
+        "search-indexer-7c6f9-wz2mf",
+        "Successfully assigned storefront/search-indexer-7c6f9-wz2mf to node-06",
+        1,
+        5,
+    ),
+    (
+        "observability",
+        "Normal",
+        "Started",
+        "Pod",
+        "otel-collector-gateway-tb6vn",
+        "Started container app",
+        1,
+        18,
+    ),
+    (
+        "default",
+        "Normal",
+        "NodeSchedulable",
+        "Node",
+        "node-09",
+        "Node node-09 status is now: NodeNotSchedulable",
+        1,
+        31,
+    ),
+    (
+        "payments",
+        "Normal",
+        "Killing",
+        "Pod",
+        "fraud-score-84d7c-h7vcd",
+        "Stopping container app",
+        1,
+        44,
+    ),
+];
+
+fn event_body(index: usize) -> String {
+    let (namespace, kind, reason, object_kind, object, message, count, minutes) = EVENTS[index];
+    let seen = (chrono::Utc::now() - chrono::Duration::minutes(minutes))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let (version, object_namespace) = match object_kind {
+        "Node" => ("v1", String::new()),
+        "Deployment" | "ReplicaSet" => ("apps/v1", format!(r#","namespace":"{namespace}""#)),
+        "Ingress" => (
+            "networking.k8s.io/v1",
+            format!(r#","namespace":"{namespace}""#),
+        ),
+        _ => ("v1", format!(r#","namespace":"{namespace}""#)),
+    };
+    let series = if count > 1 {
+        format!(r#","series":{{"count":{count},"lastObservedTime":"{seen}"}}"#)
+    } else {
+        String::new()
+    };
+    format!(
+        r#"{{"apiVersion":"events.k8s.io/v1","kind":"Event","metadata":{{"namespace":"{namespace}","name":"{object}.{index:x}","uid":"ev-{index}","resourceVersion":"1","creationTimestamp":"{seen}","managedFields":[{{"manager":"kubelet"}}]}},"eventTime":"{seen}","type":"{kind}","reason":"{reason}","action":"{reason}","note":"{message}","reportingController":"kubelet","reportingInstance":"node-07","regarding":{{"apiVersion":"{version}","kind":"{object_kind}","name":"{object}"{object_namespace}}}{series}}}"#
+    )
+}
+
+/// The event list, and each event by path, for the Events view and its details.
+fn event_objects() -> Vec<(String, String)> {
+    let items: Vec<_> = (0..EVENTS.len()).map(event_body).collect();
+    let list = format!(
+        r#"{{"kind":"EventList","apiVersion":"events.k8s.io/v1","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+        items.join(",")
+    );
+    let mut objects = vec![("/apis/events.k8s.io/v1/events".to_owned(), list)];
+    objects.extend(EVENTS.iter().enumerate().map(|(index, event)| {
+        let (namespace, object) = (event.0, event.4);
+        (
+            format!("/apis/events.k8s.io/v1/namespaces/{namespace}/events/{object}.{index:x}"),
+            event_body(index),
+        )
+    }));
+    objects
+}
+
 /// The ReplicaSets of the `checkout-api` rollout and their Deployment, for following it.
 fn workload_objects() -> Vec<(String, String)> {
     let replica_set = |hash: &str| {
@@ -1604,6 +1801,49 @@ pub fn run(directory: PathBuf) {
         table.wait_until(|window, _| window.try_find("use-namespace").is_some());
         table.settle();
         table.save(&directory, &format!("namespace-details-{suffix}.png"));
+    }
+
+    let events = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects: event_objects(),
+    });
+    let refused_events = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: vec!["/apis/events.k8s.io/v1/events"],
+        reconnect_logs: None,
+        objects: Vec::new(),
+    });
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut table = connected(&events, mode);
+        table.show_view(View::Events);
+        table.wait_until(|window, _| !window.find_all_by_label("Killing").is_empty());
+        table.save(&directory, &format!("events-{suffix}.png"));
+        let root = table.root.clone();
+        table
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        table.wait_until(|window, _| {
+            window
+                .try_find("link pod/checkout-api-7f9c6d-h7vcd")
+                .is_some()
+        });
+        table.settle();
+        table.save(&directory, &format!("event-details-{suffix}.png"));
+
+        let mut forbidden = connected(&refused_events, mode);
+        forbidden.show_view(View::Events);
+        forbidden.wait_until(|window, _| window.try_find("notice-action").is_some());
+        forbidden.save(&directory, &format!("no-permission-events-{suffix}.png"));
     }
 
     let mut empty = connected(&server, ThemeMode::Light);

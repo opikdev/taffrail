@@ -4,6 +4,7 @@ mod bench;
 mod daemonsets;
 mod deployments;
 mod details;
+mod events;
 #[cfg(any(test, feature = "preview"))]
 mod fake_api;
 mod jobs;

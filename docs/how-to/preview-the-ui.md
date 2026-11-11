@@ -55,6 +55,9 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 | `no-permission-nodes-dark.png`, `no-permission-nodes-light.png` | The Nodes view when the API refuses to list nodes |
 | `namespaces-dark.png`, `namespaces-light.png` | The Namespaces table, with a terminating namespace first and pod counts |
 | `namespace-details-dark.png`, `namespace-details-light.png` | The terminating namespace's details, with the conditions that hold it |
+| `events-dark.png`, `events-light.png` | The Events table, with warnings first and the newest first within each type |
+| `event-details-dark.png`, `event-details-light.png` | A pod's BackOff event, with its object as a link |
+| `no-permission-events-dark.png`, `no-permission-events-light.png` | The Events view when the API refuses to list events across all namespaces |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
 

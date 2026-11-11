@@ -11,7 +11,7 @@ use gpui_kit::component::table::{Column, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use taffrail_core::{Follow, ObjectKey, PodRow, Row, Selector, Snapshot};
+use taffrail_core::{Follow, ObjectKey, ObjectLink, PodRow, Row, Selector, Snapshot};
 
 /// The height of one table row, which `Size::Small` sets.
 pub const ROW_HEIGHT: Pixels = px(30.);
@@ -126,6 +126,12 @@ pub trait TableRow: Row {
     fn jump(&self) -> Option<Jump> {
         None
     }
+
+    /// Orders rows of equal urgency in the default order, lower first, such as newer events
+    /// before older ones. Rows that tie keep the snapshot's namespace and name order.
+    fn default_rank(&self) -> i64 {
+        0
+    }
 }
 
 /// Where `Enter` on a selected row goes.
@@ -133,6 +139,8 @@ pub trait TableRow: Row {
 pub enum Jump {
     /// Chooses this namespace, and returns to the view before.
     Namespace(String),
+    /// Follows a link to another object, such as an event's pod, as its details would.
+    Link(ObjectLink),
 }
 
 impl Jump {
@@ -140,6 +148,7 @@ impl Jump {
     pub fn label(&self) -> String {
         match self {
             Self::Namespace(namespace) => format!("Use namespace {namespace}"),
+            Self::Link(link) => format!("Go to {}", link.label()),
         }
     }
 }
@@ -488,7 +497,7 @@ fn namespaces<R: TableRow>(snapshot: &Snapshot<R>) -> impl Iterator<Item = &str>
 /// rows always keep that order. With no column chosen, the rows that need attention lead.
 pub fn sort_rows<R: TableRow>(rows: &mut [Arc<R>], sort: Option<(usize, SortOrder)>) {
     let Some((col_ix, order)) = sort else {
-        rows.sort_by_cached_key(|row| urgency(row.as_ref()));
+        rows.sort_by_cached_key(|row| (urgency(row.as_ref()), row.default_rank()));
         return;
     };
     let Some(column) = R::COLUMNS.get(col_ix) else {
