@@ -19,8 +19,8 @@ use taffrail_core::{
 };
 
 use crate::palette::ExportLines;
-use crate::pods::format_count;
 use crate::rows::{BlockCache, Row, RowId, RowKind, Rows};
+use crate::table::format_count;
 use crate::timeline::{
     BARS_HEIGHT, LOG_TIMELINE_CONTEXT, TIMELINE_HEIGHT, TimelineNext, TimelinePrevious, axis_time,
     bucket_label, duration_label, level_color, max_buckets, next_bucket, segment_heights,

@@ -10,10 +10,12 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, h_flex, v_flex}
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, ClusterError, Connection, ContainerDetails, PodDetails, PodEvent, PodRow,
+    Backend, ClusterError, Connection, ContainerDetails, ObjectDetails, ObjectEvent, PodDetails,
+    PodRow,
 };
 
-use crate::pods::{Tone, format_age, status_tone, unix_now};
+use crate::pods::status_tone;
+use crate::table::{TableRow, Tone, format_age, unix_now};
 
 pub const DETAILS_WIDTH: f32 = 380.;
 
@@ -34,26 +36,42 @@ pub enum DetailsEvent {
     Close,
 }
 
-/// One pod's summary, events and YAML, kept current while the panel is open.
-pub struct DetailsPane {
+/// A kind of object the details panel can show.
+pub trait Inspect: TableRow {
+    type Details: ObjectDetails;
+
+    /// The Summary tab, from the row and, once read, the details.
+    fn summary(&self, details: Option<&Self::Details>, cx: &App) -> AnyElement;
+}
+
+/// `pod` as `Pod`, for titles.
+pub fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// One object's summary, events and YAML, kept current while the panel is open.
+pub struct DetailsPane<R: Inspect> {
     backend: Arc<Backend>,
     connection: Connection,
-    row: Arc<PodRow>,
+    row: Arc<R>,
     gone: bool,
     tab: PaneTab,
-    details: Option<Result<PodDetails, SharedString>>,
+    details: Option<Result<R::Details, SharedString>>,
     yaml_lines: Rc<Vec<SharedString>>,
     yaml_scroll: UniformListScrollHandle,
     _refresh: Option<Task<()>>,
 }
 
-impl EventEmitter<DetailsEvent> for DetailsPane {}
+impl<R: Inspect> EventEmitter<DetailsEvent> for DetailsPane<R> {}
 
-impl DetailsPane {
+impl<R: Inspect> DetailsPane<R> {
     pub fn new(
         backend: Arc<Backend>,
         connection: Connection,
-        row: Arc<PodRow>,
+        row: Arc<R>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut pane = Self {
@@ -76,8 +94,8 @@ impl DetailsPane {
         cx.notify();
     }
 
-    /// Takes the latest row for this pod, and reads the pod again if it changed.
-    pub fn update_row(&mut self, row: Arc<PodRow>, cx: &mut Context<Self>) {
+    /// Takes the latest row for this object, and reads it again if it changed.
+    pub fn update_row(&mut self, row: Arc<R>, cx: &mut Context<Self>) {
         if self.row != row {
             self.row = row;
             self.refresh(cx);
@@ -85,7 +103,7 @@ impl DetailsPane {
         }
     }
 
-    /// The pod left the cluster. What was read stays visible, marked as old.
+    /// The object left the cluster. What was read stays visible, marked as old.
     pub fn mark_gone(&mut self, cx: &mut Context<Self>) {
         if !self.gone {
             self.gone = true;
@@ -102,7 +120,7 @@ impl DetailsPane {
         self._refresh = Some(cx.spawn(async move |this, cx| {
             loop {
                 let details = backend
-                    .pod_details(&connection, namespace.clone(), name.clone())
+                    .details::<R::Details>(&connection, namespace.clone(), name.clone())
                     .await;
                 if this.update(cx, |this, cx| this.show(details, cx)).is_err() {
                     return;
@@ -112,7 +130,7 @@ impl DetailsPane {
         }));
     }
 
-    fn show(&mut self, details: Result<PodDetails, ClusterError>, cx: &mut Context<Self>) {
+    fn show(&mut self, details: Result<R::Details, ClusterError>, cx: &mut Context<Self>) {
         let details = details.map_err(|error| SharedString::from(error.to_string()));
         if self.details.as_ref() == Some(&details) {
             return;
@@ -120,7 +138,7 @@ impl DetailsPane {
         if let Ok(details) = &details {
             self.yaml_lines = Rc::new(
                 details
-                    .yaml
+                    .yaml()
                     .lines()
                     .map(|line| line.to_owned().into())
                     .collect(),
@@ -130,12 +148,12 @@ impl DetailsPane {
         cx.notify();
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<R> {
         let muted = cx.theme().muted_foreground;
         let events = self
             .details
             .as_ref()
-            .and_then(|details| details.as_ref().ok()?.events.as_ref().ok())
+            .and_then(|details| details.as_ref().ok()?.events().as_ref().ok())
             .map_or(0, Vec::len);
         let event_label: SharedString = match events {
             0 => "Events".into(),
@@ -156,13 +174,13 @@ impl DetailsPane {
                             .id("details-title")
                             .test_support()
                             .role(Role::Heading)
-                            .aria_label(self.row.name.clone())
+                            .aria_label(self.row.name().to_owned())
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_medium()
-                            .child(self.row.name.clone()),
+                            .child(self.row.name().to_owned()),
                     )
                     .child(
                         Button::new("close-details")
@@ -175,12 +193,10 @@ impl DetailsPane {
                     ),
             )
             .when(self.gone, |header| {
-                header.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("This pod no longer exists. Showing what was last read."),
-                )
+                header.child(div().text_xs().text_color(muted).child(format!(
+                    "This {} no longer exists. Showing what was last read.",
+                    R::SINGULAR
+                )))
             })
             .child(
                 TabBar::new("details-tabs")
@@ -197,73 +213,7 @@ impl DetailsPane {
             )
     }
 
-    fn render_summary(&self, details: Option<&PodDetails>, cx: &App) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let status_color = status_tone(&self.row.status).color(cx);
-        let age = self
-            .row
-            .created_unix
-            .map(|created| format_age(unix_now() - created));
-        let restarts = self.row.restarts.to_string();
-        let mut fields = v_flex().gap_1p5();
-        fields = fields.child(field(
-            "Status",
-            div()
-                .text_color(status_color)
-                .child(self.row.status.clone()),
-            cx,
-        ));
-        fields = fields.child(field("Ready", div().child(self.row.ready.clone()), cx));
-        fields = fields.child(field("Restarts", div().child(restarts), cx));
-        fields = fields.child(field(
-            "Namespace",
-            div().child(self.row.namespace.clone()),
-            cx,
-        ));
-        fields = fields.child(field("Node", div().child(self.row.node.clone()), cx));
-        if let Some(age) = age {
-            fields = fields.child(field("Age", div().child(age), cx));
-        }
-        if let Some(owner) = details.and_then(|details| details.owner.clone()) {
-            fields = fields.child(field("Owner", div().child(owner), cx));
-        }
-        if let Some(ip) = details.and_then(|details| details.pod_ip.clone()) {
-            fields = fields.child(field("Pod IP", div().child(ip), cx));
-        }
-        let containers = details.map_or(&[][..], |details| &details.containers);
-        let labels = details.map_or(&[][..], |details| &details.labels);
-        v_flex()
-            .gap_4()
-            .child(fields)
-            .when(!containers.is_empty(), |summary| {
-                summary.child(
-                    v_flex()
-                        .gap_2()
-                        .child(section_title("Containers", cx))
-                        .children(
-                            containers
-                                .iter()
-                                .map(|container| render_container(container, cx)),
-                        ),
-                )
-            })
-            .when(!labels.is_empty(), |summary| {
-                summary.child(
-                    v_flex()
-                        .gap_1()
-                        .child(section_title("Labels", cx))
-                        .children(labels.iter().map(|(key, value)| {
-                            div()
-                                .text_xs()
-                                .font_family(theme.mono_font_family.clone())
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{key}={value}"))
-                        })),
-                )
-            })
-    }
-
-    fn render_events(&self, events: &Result<Vec<PodEvent>, String>, cx: &App) -> AnyElement {
+    fn render_events(&self, events: &Result<Vec<ObjectEvent>, String>, cx: &App) -> AnyElement {
         match events {
             Ok(events) if events.is_empty() => message(
                 "No recent events",
@@ -274,11 +224,15 @@ impl DetailsPane {
                 .gap_3()
                 .children(events.iter().map(|event| render_event(event, cx)))
                 .into_any_element(),
-            Err(error) => message("Can't list events for this pod", Some(error), cx),
+            Err(error) => message(
+                &format!("Can't list events for this {}", R::SINGULAR),
+                Some(error),
+                cx,
+            ),
         }
     }
 
-    fn render_yaml(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_yaml(&self, cx: &mut Context<Self>) -> impl IntoElement + use<R> {
         let lines = self.yaml_lines.clone();
         let count = lines.len();
         let yaml = lines
@@ -330,7 +284,71 @@ impl DetailsPane {
     }
 }
 
-fn field(label: &'static str, value: Div, cx: &App) -> Div {
+impl Inspect for PodRow {
+    type Details = PodDetails;
+
+    fn summary(&self, details: Option<&PodDetails>, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let status_color = status_tone(&self.status).color(cx);
+        let age = self
+            .created_unix
+            .map(|created| format_age(unix_now() - created));
+        let restarts = self.restarts.to_string();
+        let mut fields = v_flex().gap_1p5();
+        fields = fields.child(field(
+            "Status",
+            div().text_color(status_color).child(self.status.clone()),
+            cx,
+        ));
+        fields = fields.child(field("Ready", div().child(self.ready.clone()), cx));
+        fields = fields.child(field("Restarts", div().child(restarts), cx));
+        fields = fields.child(field("Namespace", div().child(self.namespace.clone()), cx));
+        fields = fields.child(field("Node", div().child(self.node.clone()), cx));
+        if let Some(age) = age {
+            fields = fields.child(field("Age", div().child(age), cx));
+        }
+        if let Some(owner) = details.and_then(|details| details.owner.clone()) {
+            fields = fields.child(field("Owner", div().child(owner), cx));
+        }
+        if let Some(ip) = details.and_then(|details| details.pod_ip.clone()) {
+            fields = fields.child(field("Pod IP", div().child(ip), cx));
+        }
+        let containers = details.map_or(&[][..], |details| &details.containers);
+        let labels = details.map_or(&[][..], |details| &details.labels);
+        v_flex()
+            .gap_4()
+            .child(fields)
+            .when(!containers.is_empty(), |summary| {
+                summary.child(
+                    v_flex()
+                        .gap_2()
+                        .child(section_title("Containers", cx))
+                        .children(
+                            containers
+                                .iter()
+                                .map(|container| render_container(container, cx)),
+                        ),
+                )
+            })
+            .when(!labels.is_empty(), |summary| {
+                summary.child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title("Labels", cx))
+                        .children(labels.iter().map(|(key, value)| {
+                            div()
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{key}={value}"))
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+pub fn field(label: &'static str, value: Div, cx: &App) -> Div {
     h_flex()
         .gap_2()
         .items_start()
@@ -345,14 +363,14 @@ fn field(label: &'static str, value: Div, cx: &App) -> Div {
         .child(value.flex_1().min_w_0())
 }
 
-fn section_title(title: &'static str, cx: &App) -> impl IntoElement + use<> {
+pub fn section_title(title: &'static str, cx: &App) -> impl IntoElement + use<> {
     div()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(title)
 }
 
-fn message(title: &str, detail: Option<&str>, cx: &App) -> AnyElement {
+pub fn message(title: &str, detail: Option<&str>, cx: &App) -> AnyElement {
     v_flex()
         .gap_1()
         .text_sm()
@@ -425,7 +443,7 @@ fn render_container(container: &ContainerDetails, cx: &App) -> impl IntoElement 
         })
 }
 
-fn render_event(event: &PodEvent, cx: &App) -> impl IntoElement + use<> {
+fn render_event(event: &ObjectEvent, cx: &App) -> impl IntoElement + use<> {
     let muted = cx.theme().muted_foreground;
     let tone = if event.warning {
         Tone::Degraded
@@ -498,25 +516,22 @@ fn render_yaml_line(line: SharedString, cx: &App) -> impl IntoElement + use<> {
         .child(div().child(value.to_owned()))
 }
 
-impl Render for DetailsPane {
+impl<R: Inspect> Render for DetailsPane<R> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header = self.render_header(cx);
         let details = self.details.clone();
         let body = match (&details, self.tab) {
             (Some(Err(error)), _) if !self.gone => scrollable(
                 "details-error",
-                message("Can't read this pod", Some(error), cx),
+                message(&format!("Can't read this {}", R::SINGULAR), Some(error), cx),
             ),
             (Some(Ok(_)), PaneTab::Yaml) => self.render_yaml(cx).into_any_element(),
             (Some(Ok(details)), PaneTab::Events) => {
-                scrollable("details-events", self.render_events(&details.events, cx))
+                scrollable("details-events", self.render_events(details.events(), cx))
             }
             (details, PaneTab::Summary) => {
                 let details = details.as_ref().and_then(|details| details.as_ref().ok());
-                scrollable(
-                    "details-summary",
-                    self.render_summary(details, cx).into_any_element(),
-                )
+                scrollable("details-summary", self.row.summary(details, cx))
             }
             _ => scrollable("details-loading", message("Loading", None, cx)),
         };
@@ -524,7 +539,7 @@ impl Render for DetailsPane {
             .id("details")
             .test_support()
             .role(Role::Complementary)
-            .aria_label("Pod details")
+            .aria_label(format!("{} details", capitalized(R::SINGULAR)))
             .size_full()
             .child(header)
             .child(div().flex_1().min_h_0().child(body))

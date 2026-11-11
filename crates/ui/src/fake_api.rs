@@ -21,6 +21,8 @@ pub struct Fixture {
     /// When set, a log request after a pod's first gets this in place of `logs`, as a log
     /// that rotated while the stream was down.
     pub reconnect_logs: Option<String>,
+    /// Paths the API refuses with a 403, as it does a role that may not list them.
+    pub forbidden: Vec<&'static str>,
 }
 
 /// A kubeconfig whose only context, `dev`, points at `server`.
@@ -42,6 +44,43 @@ users:
     user: {{}}
 "#
     )
+}
+
+/// The message Kubernetes RBAC gives for a list it refuses at `path`.
+pub fn forbidden_message(path: &str) -> String {
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let (group, rest) = match parts.as_slice() {
+        ["api", _, rest @ ..] => ("", rest),
+        ["apis", group, _, rest @ ..] => (*group, rest),
+        _ => ("", &[][..]),
+    };
+    let (scope, resource) = match rest {
+        ["namespaces", namespace, resource] => {
+            (format!("in the namespace \"{namespace}\""), *resource)
+        }
+        [resource] => ("at the cluster scope".to_owned(), *resource),
+        _ => (String::new(), ""),
+    };
+    let qualified = if group.is_empty() {
+        resource.to_owned()
+    } else {
+        format!("{resource}.{group}")
+    };
+    format!(
+        r#"{qualified} is forbidden: User "jane" cannot list resource "{resource}" in API group "{group}" {scope}"#
+    )
+}
+
+fn respond_forbidden(mut stream: &TcpStream, path: &str) {
+    let message = forbidden_message(path).replace('"', "\\\"");
+    let body = format!(
+        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{message}","reason":"Forbidden","code":403}}"#
+    );
+    let response = format!(
+        "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
 }
 
 fn respond(mut stream: &TcpStream, body: &str) {
@@ -96,10 +135,12 @@ fn serve_request(
         .nth(1)
         .and_then(|target| target.split('?').next())
         .unwrap_or_default();
-    if let Some((_, body)) = fixture.objects.iter().find(|(object, _)| object == path) {
-        respond(&stream, body);
-    } else if request_line.contains("watch=true") {
+    if request_line.contains("watch=true") {
         thread::park();
+    } else if fixture.forbidden.contains(&path) {
+        respond_forbidden(&stream, path);
+    } else if let Some((_, body)) = fixture.objects.iter().find(|(object, _)| object == path) {
+        respond(&stream, body);
     } else if request_line.contains("/api/v1/pods") {
         respond(&stream, &fixture.pod_list);
     } else if request_line.contains("/log?") {

@@ -37,6 +37,9 @@ The app connects to a fake API server with sample pods and logs, runs through it
 | `no-namespace-pods-light.png` | A chosen namespace with no pods |
 | `columns-hidden-dark.png`, `columns-menu-dark.png` | The pod table with columns hidden, and the **Columns** menu open |
 | `narrow-dark.png`, `narrow-columns-menu-dark.png` | The panel header at the 760 px minimum width, and its **Columns** menu open |
+| `deployments-dark.png`, `deployments-light.png` | The Deployments table, with stalled, unavailable and progressing rollouts first |
+| `deployment-details-dark.png`, `deployment-details-light.png` | A stalled Deployment's details |
+| `no-permission-dark.png`, `no-permission-light.png` | The Deployments view when the API refuses to list Deployments, with the lock in the sidebar |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |
 

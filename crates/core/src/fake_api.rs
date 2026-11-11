@@ -24,6 +24,7 @@ pub struct Request {
 }
 
 /// How the fake server answers a request.
+#[derive(Clone)]
 pub enum Reply {
     Json(String),
     /// A whole plain-text body, as a log that ends.
@@ -32,6 +33,10 @@ pub enum Reply {
     Cut(String),
     /// A Kubernetes error status with this code.
     Status(u16),
+    /// A 403 with this message, as the API refuses a role.
+    Forbidden(&'static str),
+    /// Never answers, as a watch with no changes.
+    Hang,
 }
 
 /// Answers a request, or leaves it to the fixed routes with `None`.
@@ -71,6 +76,13 @@ async fn reply(stream: &mut TcpStream, reply: Reply) {
             );
             respond(stream, &format!("{code} Failed"), "application/json", &body).await;
         }
+        Reply::Forbidden(message) => {
+            let body = format!(
+                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{message}","reason":"Forbidden","code":403}}"#
+            );
+            respond(stream, "403 Forbidden", "application/json", &body).await;
+        }
+        Reply::Hang => std::future::pending().await,
     }
 }
 

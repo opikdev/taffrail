@@ -1,6 +1,7 @@
 //! Cluster state, watches and log storage. This crate never imports GPUI.
 
 mod cluster;
+mod deployments;
 mod details;
 mod environment;
 #[cfg(test)]
@@ -10,9 +11,11 @@ mod logs;
 mod pods;
 mod selector;
 mod state;
+mod watch;
 
 pub use cluster::{Backend, ClusterError, Connection, Contexts};
-pub use details::{ContainerDetails, PodDetails, PodEvent};
+pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
+pub use details::{ContainerDetails, ObjectDetails, ObjectEvent, PodDetails};
 pub use environment::use_login_shell_environment;
 pub use follow::Follow;
 pub use logs::{
@@ -24,6 +27,7 @@ pub use logs::{
 pub use pods::{Owner, PodFeed, PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use selector::Selector;
 pub use state::{SavedState, WindowRect, state_path};
+pub use watch::{Feed, ObjectKey, ResourceWatch, Row, Snapshot, WatchError};
 
 pub const APP_NAME: &str = "Taffrail";
 /// The bundle identifier, also used as the Windows app ID and the Linux window class.

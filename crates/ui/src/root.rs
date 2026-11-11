@@ -9,20 +9,18 @@ use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IndexPath, Sizable, Size, StyledExt, Theme, TitleBar, h_flex,
-    v_flex,
+    ActiveTheme, Disableable, Icon, IndexPath, Sizable, StyledExt, Theme, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{
     Backend, ClusterError, Connection, Contexts, Follow, LogFilter, LogTail, LogTarget,
-    MAX_TAIL_PODS, PodFeed, PodKey, PodSnapshot, SavedState, Selector,
+    MAX_TAIL_PODS, PodKey, PodRow, PodSnapshot, SavedState, Selector, WatchError,
 };
 
 use crate::about::render_about;
-use crate::details::{DETAILS_WIDTH, DetailsEvent, DetailsPane, PaneTab};
+use crate::details::{DETAILS_WIDTH, PaneTab};
 use crate::logs::{
     BAR_HEIGHT, CONTEXT_CHOICES, ClearLineSelection, ExtendNextLine, ExtendPreviousLine,
     LOG_FILTER_CONTEXT, LOG_LINES_CONTEXT, LineContextPicker, LogControls, LogPane, ResetLogFilter,
@@ -30,15 +28,16 @@ use crate::logs::{
     chosen_severity, dock_height,
 };
 use crate::palette::{
-    CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, NextError, OpenPalette,
-    OpenPod, OpenSelected, PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts, ShowAbout,
-    ShowEvents, ShowShortcuts, ShowSummary, ShowYaml, SwitchContext, SwitchNamespace,
-    TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar, groups,
-    render_shortcuts,
+    ClearSelector, CloseWindow, CopyLines, ExportLines, FocusFilter, FocusLogFilter, NextError,
+    OpenPalette, OpenPod, OpenSelected, PALETTE_KEY, PaletteSource, PreviousError, ReloadContexts,
+    ShowAbout, ShowEvents, ShowPods, ShowShortcuts, ShowSummary, ShowView, ShowYaml, SwitchContext,
+    SwitchNamespace, TailSelection, TailSelector, TailWorkload, ToggleFollow, ToggleSidebar,
+    groups, render_shortcuts,
 };
-use crate::pods::{ALL_NAMESPACES, ALWAYS_SHOWN_COLUMN, PodTable, column_names, show_in_place};
-use crate::sidebar::resource_sidebar;
+use crate::sidebar::{SidebarItem, resource_sidebar};
+use crate::table::{ALL_NAMESPACES, ResourceTable, SelectorFilter, TableRow};
 use crate::timeline::{LOG_TIMELINE_CONTEXT, TimelineNext, TimelinePrevious};
+use crate::views::{Panel, ResourcePanel, View, new_panel};
 use crate::windows;
 
 type ContextPicker = SelectState<Vec<String>>;
@@ -105,6 +104,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f", FocusLogFilter, Some(TABLE_KEYS)),
         KeyBinding::new("l", TailSelection, Some(TABLE_KEYS)),
         KeyBinding::new("w", TailWorkload, Some(TABLE_KEYS)),
+        KeyBinding::new("p", ShowPods, Some(TABLE_KEYS)),
         KeyBinding::new("s", ShowSummary, Some(TABLE_KEYS)),
         KeyBinding::new("e", ShowEvents, Some(TABLE_KEYS)),
         KeyBinding::new("y", ShowYaml, Some(TABLE_KEYS)),
@@ -127,6 +127,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(TOGGLE_SIDEBAR_KEY, ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new(CLOSE_WINDOW_KEY, CloseWindow, Some(KEY_CONTEXT)),
     ]);
+    cx.bind_keys(
+        View::ALL.map(|view| KeyBinding::new(view.key(), ShowView { view }, Some(TABLE_KEYS))),
+    );
 }
 
 const TITLE_BAR_HEIGHT: f32 = 40.;
@@ -178,17 +181,18 @@ enum Session {
 }
 
 #[derive(Clone, Copy)]
-enum NoticeAction {
+pub(crate) enum NoticeAction {
     ReloadContexts,
     RetryConnection,
     ClearFilter,
     ShowAllNamespaces,
+    ShowContextNamespace,
 }
 
-struct Notice {
+pub(crate) struct Notice {
     title: SharedString,
     detail: Option<SharedString>,
-    action: Option<(NoticeAction, &'static str)>,
+    action: Option<(NoticeAction, SharedString)>,
 }
 
 impl Notice {
@@ -205,8 +209,8 @@ impl Notice {
         self
     }
 
-    fn action(mut self, action: NoticeAction, label: &'static str) -> Self {
-        self.action = Some((action, label));
+    fn action(mut self, action: NoticeAction, label: impl Into<SharedString>) -> Self {
+        self.action = Some((action, label.into()));
         self
     }
 }
@@ -215,18 +219,23 @@ pub struct Root {
     backend: Arc<Backend>,
     contexts: Option<Contexts>,
     picker: Option<Entity<ContextPicker>>,
-    pods: Entity<TableState<PodTable>>,
+    /// The pod view, which keeps watching while other views show, for the palette, the
+    /// sidebar count and log tails that follow pods.
+    pods: ResourcePanel<PodRow>,
+    /// Every other view, created as it is first opened.
+    panels: Vec<Box<dyn Panel>>,
+    view: View,
+    /// Hidden columns of views not yet opened, from saved state.
+    saved_columns: std::collections::BTreeMap<String, Vec<String>>,
     filter: Entity<InputState>,
     namespace_picker: Entity<NamespacePicker>,
     namespace_options: Vec<String>,
     connection: Option<Connection>,
-    pod_feed: Option<PodFeed>,
     logs: Option<Entity<LogPane>>,
     log_controls: LogControls,
     /// Says what the log dock is waiting for, or why a tail could not start.
     log_note: Option<SharedString>,
     workload_task: Option<Task<()>>,
-    details: Option<Entity<DetailsPane>>,
     palette: Option<Entity<CommandState>>,
     sheet: Option<Sheet>,
     focus_handle: FocusHandle,
@@ -238,8 +247,6 @@ pub struct Root {
     _filter_events: Subscription,
     _log_filter_events: [Subscription; 3],
     _namespace_events: Subscription,
-    _table_events: Subscription,
-    _details_events: Option<Subscription>,
     _appearance: Subscription,
     _bounds: Subscription,
 }
@@ -252,13 +259,13 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pods = cx.new(|cx| {
-            TableState::new(PodTable::default(), window, cx)
-                .col_movable(false)
-                .col_resizable(false)
-                .row_selectable(false)
-        });
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter pods"));
+        let pods = ResourcePanel::new(View::Pods, window, cx);
+        let view = saved
+            .view
+            .as_deref()
+            .and_then(View::from_name)
+            .unwrap_or(View::Pods);
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(filter_placeholder(view)));
         let filter_events = cx.subscribe_in(
             &filter,
             window,
@@ -292,13 +299,6 @@ impl Root {
                 this.remember_state(window, cx);
             },
         );
-        let table_events =
-            cx.subscribe_in(&pods, window, |this, _, event: &TableEvent, window, cx| {
-                if matches!(event, TableEvent::SelectRow(_)) {
-                    this.focus_handle.focus(window, cx);
-                    this.open_details(cx);
-                }
-            });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
@@ -312,6 +312,7 @@ impl Root {
             context: saved_context,
             namespace,
             hidden_columns,
+            view_columns,
             ..
         } = saved;
         let mut root = Self {
@@ -319,16 +320,17 @@ impl Root {
             contexts: None,
             picker: None,
             pods,
+            panels: Vec::new(),
+            view: View::Pods,
+            saved_columns: view_columns,
             filter,
             namespace_picker,
             namespace_options,
             connection: None,
-            pod_feed: None,
             logs: None,
             log_controls,
             log_note: None,
             workload_task: None,
-            details: None,
             palette: None,
             sheet: None,
             focus_handle,
@@ -340,15 +342,114 @@ impl Root {
             _filter_events: filter_events,
             _log_filter_events: log_filter_events,
             _namespace_events: namespace_events,
-            _table_events: table_events,
-            _details_events: None,
             _appearance: appearance,
             _bounds: bounds,
         };
-        root.set_hidden_columns(hidden_columns, cx);
+        root.pods.set_hidden_columns(&hidden_columns, cx);
         root.set_namespace(namespace, window, cx);
+        root.show_view(view, window, cx);
         root.load_contexts(contexts, window, cx);
         root
+    }
+
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus_handle.focus(window, cx);
+    }
+
+    fn panel_for(&self, view: View) -> &dyn Panel {
+        match view {
+            View::Pods => &self.pods,
+            view => self
+                .panels
+                .iter()
+                .find(|panel| panel.view() == view)
+                .map_or(&self.pods, Box::as_ref),
+        }
+    }
+
+    fn panel_mut_for(&mut self, view: View) -> &mut dyn Panel {
+        match view {
+            View::Pods => &mut self.pods,
+            view => match self.panels.iter().position(|panel| panel.view() == view) {
+                Some(ix) => self.panels[ix].as_mut(),
+                None => &mut self.pods,
+            },
+        }
+    }
+
+    /// Shows a pod snapshot as the pod watch would.
+    #[cfg(test)]
+    fn show_pods(
+        &mut self,
+        snapshot: std::sync::Arc<PodSnapshot>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pods.table.update(cx, |table, cx| {
+            crate::table::show_in_place(table, snapshot, cx);
+        });
+        self.after_snapshot(View::Pods, window, cx);
+    }
+
+    fn panel(&self) -> &dyn Panel {
+        self.panel_for(self.view)
+    }
+
+    fn pod_table<'a>(&self, cx: &'a App) -> &'a ResourceTable<PodRow> {
+        self.pods.table.read(cx).delegate()
+    }
+
+    /// Opens `view`, starting its watch, and closes the details of the view it leaves.
+    /// Views other than Pods stop watching when left.
+    pub(crate) fn show_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        if view != View::Pods && !self.panels.iter().any(|panel| panel.view() == view) {
+            let panel = new_panel(view, window, cx);
+            if let Some(hidden) = self.saved_columns.get(view.name()) {
+                panel.set_hidden_columns(hidden, cx);
+            }
+            panel.set_namespace(self.namespace(cx), cx);
+            self.panels.push(panel);
+        }
+        let previous = self.view;
+        if previous != view {
+            self.panel_mut_for(previous).close_details(cx);
+            if previous != View::Pods {
+                self.panel_mut_for(previous).stop(cx);
+            }
+        }
+        self.view = view;
+        let filter = self.filter.read(cx).value().to_string();
+        self.panel_for(view).set_filter(filter, cx);
+        self.filter.update(cx, |input, cx| {
+            input.set_placeholder(filter_placeholder(view), window, cx);
+        });
+        self.start_view(view, window, cx);
+        self.update_namespace_options(window, cx);
+        cx.notify();
+    }
+
+    fn start_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let namespace = self.namespace(cx);
+        let backend = self.backend.clone();
+        self.panel_mut_for(view)
+            .start(&backend, &connection, namespace, window, cx);
+    }
+
+    /// Runs after a view's table takes a new snapshot.
+    pub(crate) fn after_snapshot(
+        &mut self,
+        view: View,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if view == View::Pods || view == self.view {
+            self.update_namespace_options(window, cx);
+        }
+        self.panel_for(view).update_details(cx);
+        cx.notify();
     }
 
     fn load_contexts(
@@ -413,11 +514,9 @@ impl Root {
             context,
             sidebar_collapsed: self.sidebar_collapsed,
             namespace: self.namespace(cx),
-            hidden_columns: self
-                .hidden_columns(cx)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            hidden_columns: owned(self.pods.hidden_columns(cx)),
+            view: Some(self.view.name().to_owned()),
+            view_columns: self.view_columns(cx),
             ..SavedState::default()
         };
         windows::with_placement(state, window, cx)
@@ -435,16 +534,18 @@ impl Root {
             context: context.clone(),
         };
         self.connection = None;
-        self.pod_feed = None;
         self.logs = None;
         self.log_note = None;
         self.workload_task = None;
         self.close_details(cx);
-        self.show_pods(Arc::default(), window, cx);
+        self.pods.stop(cx);
+        for panel in &mut self.panels {
+            panel.stop(cx);
+        }
+        self.update_namespace_options(window, cx);
         let connecting = self.backend.connect(contexts, context.clone());
-        let backend = self.backend.clone();
-        // Replacing the task drops any earlier session and its watch, so a slow
-        // context cannot overwrite a newer choice.
+        // Replacing the task drops any earlier session, so a slow context cannot
+        // overwrite a newer choice.
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let connection = match connecting.await {
                 Ok(connection) => connection,
@@ -460,25 +561,17 @@ impl Root {
                     return;
                 }
             };
-            let mut pods = backend.watch_pods(&connection);
-            let feed = pods.feed();
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.session = Session::Connected {
                     summary: connection_summary(&connection),
                     version: connection.server_version.clone(),
                 };
                 this.connection = Some(connection);
-                this.pod_feed = Some(feed);
+                this.start_view(View::Pods, window, cx);
+                this.start_view(this.view, window, cx);
                 cx.notify();
             })
             .ok();
-            while let Some(snapshot) = pods.next().await {
-                let updated =
-                    this.update_in(cx, |this, window, cx| this.show_pods(snapshot, window, cx));
-                if updated.is_err() {
-                    return;
-                }
-            }
         }));
         cx.notify();
     }
@@ -498,10 +591,10 @@ impl Root {
 
     /// Tails the pods that `follow` matches, as they come and go.
     fn start_follow(&mut self, follow: Follow, cx: &mut Context<Self>) {
-        let (Some(connection), Some(feed)) = (&self.connection, &self.pod_feed) else {
+        let (Some(connection), Some(feed)) = (&self.connection, self.pods.feed()) else {
             return;
         };
-        let tail = self.backend.follow_logs(connection, feed.clone(), follow);
+        let tail = self.backend.follow_logs(connection, feed, follow);
         self.show_tail(tail, cx);
     }
 
@@ -533,10 +626,19 @@ impl Root {
         cx.notify();
     }
 
-    /// Follows the workload that controls the selected pod, such as its Deployment.
+    /// Follows the selected workload's pods, or the workload that controls the selected pod,
+    /// such as its Deployment.
     pub(crate) fn tail_workload(&mut self, cx: &mut Context<Self>) {
-        let table = self.pods.read(cx).delegate();
-        let selected = table.selected().and_then(|key| table.snapshot().find(key));
+        if self.view != View::Pods {
+            match self.panel().selected_follow(cx) {
+                Some(follow) => self.start_follow(follow, cx),
+                None => {
+                    self.set_log_note(Some("Select a workload to tail its pods".to_owned()), cx)
+                }
+            }
+            return;
+        }
+        let selected = self.pod_table(cx).selected_object();
         let (Some(row), Some(connection)) = (selected.cloned(), self.connection.as_ref()) else {
             self.set_log_note(Some("Select a pod to tail its workload".to_owned()), cx);
             return;
@@ -586,15 +688,16 @@ impl Root {
         Some(self.logs.as_ref()?.read(cx).stats())
     }
 
+    /// The rows the current view's watch has listed, once it has.
     #[cfg(feature = "bench")]
-    pub(crate) fn synced_pod_count(&self, cx: &App) -> Option<usize> {
-        let snapshot = self.pods.read(cx).delegate().snapshot();
-        (self.connection.is_some() && snapshot.synced).then_some(snapshot.rows.len())
+    pub(crate) fn synced_row_count(&self, cx: &App) -> Option<usize> {
+        let status = self.panel().status(cx);
+        (self.connection.is_some() && status.synced).then_some(status.total)
     }
 
     #[cfg(feature = "bench")]
-    pub(crate) fn scroll_pods_to(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.pods.update(cx, |pods, cx| pods.scroll_to_row(row, cx));
+    pub(crate) fn scroll_rows_to(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.panel().scroll_to_row(row, cx);
     }
 
     /// Types `query` in the log filter and picks the severity choice at `severity`.
@@ -635,34 +738,24 @@ impl Root {
         cx.notify();
     }
 
-    fn open_details(&mut self, cx: &mut Context<Self>) {
-        let table = self.pods.read(cx).delegate();
-        let selected = table.selected().and_then(|key| table.snapshot().find(key));
-        let (Some(row), Some(connection)) = (selected.cloned(), self.connection.clone()) else {
+    pub(crate) fn open_details(&mut self, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection.clone() else {
             return;
         };
         let backend = self.backend.clone();
-        let details = cx.new(|cx| DetailsPane::new(backend, connection, row, cx));
-        self._details_events = Some(cx.subscribe(&details, |this, _, event, cx| match event {
-            DetailsEvent::Close => this.close_details(cx),
-        }));
-        self.details = Some(details);
+        self.panel_mut_for(self.view)
+            .open_details(backend, connection, cx);
         cx.notify();
     }
 
-    fn close_details(&mut self, cx: &mut Context<Self>) {
-        self.details = None;
-        self._details_events = None;
-        self.pods.update(cx, |pods, cx| {
-            pods.delegate_mut().clear_selection();
-            cx.notify();
-        });
+    pub(crate) fn close_details(&mut self, cx: &mut Context<Self>) {
+        self.panel_mut_for(self.view).close_details(cx);
         cx.notify();
     }
 
-    /// Opens the selected pod, or the first row if nothing is selected.
+    /// Opens the selected row, or the first row if nothing is selected.
     fn open_selected(&mut self, cx: &mut Context<Self>) {
-        if self.pods.read(cx).delegate().selected().is_some() {
+        if self.panel().has_selection(cx) {
             self.open_details(cx);
         } else {
             self.move_selection(1, cx);
@@ -671,22 +764,34 @@ impl Root {
 
     fn open_pod(&mut self, key: PodKey, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
-        let shown = self
-            .pods
-            .update(cx, |pods, _| pods.delegate_mut().select_key(key));
-        if shown.is_none() {
+        self.show_view(View::Pods, window, cx);
+        if !self.pods.select(key.clone(), cx) {
             self.clear_filter(window, cx);
             self.set_namespace(None, window, cx);
-            self.remember_state(window, cx);
+            self.pods.select(key, cx);
         }
-        self.pods.update(cx, |pods, cx| {
-            if let Some(row_ix) = pods.delegate().selected_row() {
-                pods.vertical_scroll_handle
-                    .scroll_to_item(row_ix, ScrollStrategy::Nearest);
-            }
-            cx.notify();
-        });
+        self.remember_state(window, cx);
         self.open_details(cx);
+    }
+
+    /// Shows the pods of the selected workload, by its selector and in its namespace.
+    fn show_workload_pods(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(follow) = self.panel().selected_follow(cx) else {
+            return;
+        };
+        self.filter
+            .update(cx, |filter, cx| filter.set_value("", window, cx));
+        self.show_view(View::Pods, window, cx);
+        self.pods.set_selector(
+            Some(SelectorFilter {
+                label: follow.label,
+                selector: follow.selector,
+            }),
+            cx,
+        );
+        self.set_namespace(follow.namespace, window, cx);
+        self.remember_state(window, cx);
+        cx.notify();
     }
 
     fn selected_context(&self, cx: &App) -> Option<String> {
@@ -743,9 +848,11 @@ impl Root {
         self.apply_log_filter(cx);
     }
 
+    /// Clears the filter text, and any selector narrowing the view.
     fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter
             .update(cx, |filter, cx| filter.set_value("", window, cx));
+        self.panel().set_selector(None, cx);
         self.apply_filter(String::new(), cx);
     }
 
@@ -781,13 +888,15 @@ impl Root {
     }
 
     fn show_tab(&mut self, tab: PaneTab, cx: &mut Context<Self>) {
-        if let Some(details) = &self.details {
-            details.update(cx, |details, cx| details.show_tab(tab, cx));
-        }
+        self.panel().show_tab(tab, cx);
     }
 
     fn tail_selection(&mut self, cx: &mut Context<Self>) {
-        let selected = self.pods.read(cx).delegate().selection_targets();
+        if self.view != View::Pods {
+            self.tail_workload(cx);
+            return;
+        }
+        let selected = self.pod_table(cx).selection_targets();
         match selected {
             Some(targets) => self.start_tail(targets, cx),
             None => self.tail_logs(cx),
@@ -801,16 +910,7 @@ impl Root {
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let moved = self.pods.update(cx, |pods, cx| {
-            let moved = pods.delegate_mut().move_selection(delta);
-            if let Some(row_ix) = moved {
-                pods.vertical_scroll_handle
-                    .scroll_to_item(row_ix, ScrollStrategy::Nearest);
-            }
-            cx.notify();
-            moved
-        });
-        if moved.is_some() {
+        if self.panel().move_selection(delta, cx) {
             self.open_details(cx);
         }
     }
@@ -822,29 +922,24 @@ impl Root {
     }
 
     fn log_targets(&self, cx: &App) -> Vec<LogTarget> {
-        self.pods.read(cx).delegate().log_targets()
+        self.pod_table(cx).log_targets()
     }
 
-    fn show_pods(
-        &mut self,
-        snapshot: Arc<PodSnapshot>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.pods
-            .update(cx, |pods, cx| show_in_place(pods, snapshot, cx));
-        self.update_namespace_options(window, cx);
-        self.update_details(cx);
-        cx.notify();
-    }
-
-    /// Snapshots arrive up to 10 times a second, and most leave the namespaces alone.
+    /// The namespaces with pods, or with objects of the current view, after **All
+    /// namespaces**. A chosen namespace stays listed after it disappears. Snapshots arrive
+    /// up to 10 times a second, and most leave the namespaces alone.
     fn update_namespace_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let options = self.pods.read(cx).delegate().namespace_options();
+        let mut options: Vec<String> = owned(self.pod_table(cx).namespace_options());
+        if self.view != View::Pods {
+            for namespace in self.panel().namespaces(cx) {
+                if let Err(ix) = options[1..].binary_search(&namespace) {
+                    options.insert(ix + 1, namespace);
+                }
+            }
+        }
         if options == self.namespace_options {
             return;
         }
-        let options: Vec<String> = options.into_iter().map(str::to_owned).collect();
         self.namespace_options.clone_from(&options);
         self.namespace_picker.update(cx, |picker, cx| {
             picker.set_items(options.into(), window, cx);
@@ -852,7 +947,7 @@ impl Root {
     }
 
     pub(crate) fn namespace(&self, cx: &App) -> Option<String> {
-        self.pods.read(cx).delegate().namespace().map(str::to_owned)
+        self.pod_table(cx).namespace().map(str::to_owned)
     }
 
     pub(crate) fn set_namespace(
@@ -861,10 +956,10 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pods.update(cx, |pods, cx| {
-            pods.delegate_mut().set_namespace(namespace);
-            cx.notify();
-        });
+        self.pods.set_namespace(namespace.clone(), cx);
+        for panel in &self.panels {
+            panel.set_namespace(namespace.clone(), cx);
+        }
         self.update_namespace_options(window, cx);
         let choice = self
             .namespace(cx)
@@ -875,45 +970,44 @@ impl Root {
         cx.notify();
     }
 
-    fn update_details(&mut self, cx: &mut Context<Self>) {
-        let Some(details) = self.details.clone() else {
-            return;
-        };
-        let table = self.pods.read(cx).delegate();
-        let snapshot = table.snapshot();
-        if !snapshot.synced {
-            return;
-        }
-        let row = table.selected().and_then(|key| snapshot.find(key)).cloned();
-        details.update(cx, |details, cx| match row {
-            Some(row) => details.update_row(row, cx),
-            None => details.mark_gone(cx),
-        });
-    }
-
     fn apply_filter(&mut self, filter: String, cx: &mut Context<Self>) {
-        self.pods.update(cx, |pods, cx| {
-            pods.delegate_mut().set_filter(filter);
-            cx.notify();
-        });
+        self.panel().set_filter(filter, cx);
         cx.notify();
     }
 
+    /// The current view's hidden columns.
     pub(crate) fn hidden_columns(&self, cx: &App) -> Vec<&'static str> {
-        self.pods.read(cx).delegate().hidden_columns()
+        self.panel().hidden_columns(cx)
     }
 
+    /// Hides these columns of the current view and shows the rest.
     pub(crate) fn set_hidden_columns(
         &mut self,
         names: impl IntoIterator<Item = impl AsRef<str>>,
         cx: &mut Context<Self>,
     ) {
-        self.pods.update(cx, |pods, cx| {
-            pods.delegate_mut().set_hidden_columns(names);
-            pods.refresh(cx);
-            cx.notify();
-        });
+        let names: Vec<String> = names
+            .into_iter()
+            .map(|name| name.as_ref().to_owned())
+            .collect();
+        self.panel().set_hidden_columns(&names, cx);
         cx.notify();
+    }
+
+    /// Hidden columns by view, for views other than Pods. Views not opened yet keep what
+    /// was saved.
+    fn view_columns(&self, cx: &App) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut columns = self.saved_columns.clone();
+        for panel in &self.panels {
+            let hidden = owned(panel.hidden_columns(cx));
+            let name = panel.view().name().to_owned();
+            if hidden.is_empty() {
+                columns.remove(&name);
+            } else {
+                columns.insert(name, hidden);
+            }
+        }
+        columns
     }
 
     fn toggle_column(&mut self, name: &'static str, cx: &mut Context<Self>) {
@@ -945,6 +1039,11 @@ impl Root {
                 self.set_namespace(None, window, cx);
                 self.remember_state(window, cx);
             }
+            NoticeAction::ShowContextNamespace => {
+                let namespace = self.connection.as_ref().map(|c| c.namespace.clone());
+                self.set_namespace(namespace, window, cx);
+                self.remember_state(window, cx);
+            }
         }
     }
 
@@ -956,14 +1055,15 @@ impl Root {
             Session::Connecting { context } => format!("Connecting to {context}"),
             Session::Failed { error, .. } => error.to_string(),
             Session::Connected { summary, .. } => {
-                pod_status(summary, self.pods.read(cx).delegate().snapshot())
+                pod_status(summary, self.pod_table(cx).snapshot())
             }
         }
     }
 
     fn notice(&self, cx: &App) -> Option<Notice> {
-        let table = self.pods.read(cx).delegate();
-        let snapshot = table.snapshot();
+        let status = self.panel().status(cx);
+        let name = self.view.name();
+        let plural = name.to_lowercase();
         match &self.session {
             Session::NoClusters { error } => {
                 let detail = error.clone().unwrap_or_else(|| {
@@ -987,14 +1087,45 @@ impl Root {
                     .detail(error.clone())
                     .action(NoticeAction::RetryConnection, "Try again"),
             ),
-            Session::Connected { .. } if !snapshot.synced => {
-                Some(snapshot.error.clone().map_or_else(
-                    || Notice::new("Loading pods"),
-                    |error| Notice::new("Can't list pods").detail(error),
-                ))
+            Session::Connected { .. } => match status.error {
+                Some(WatchError::Forbidden { namespace, message }) => {
+                    Some(self.forbidden_notice(name, namespace, message))
+                }
+                Some(WatchError::NotServed { message }) => {
+                    Some(Notice::new(format!("This cluster doesn't serve {name}")).detail(message))
+                }
+                Some(WatchError::Failed { message }) if !status.synced => {
+                    Some(Notice::new(format!("Can't list {plural}")).detail(message))
+                }
+                _ if !status.synced => Some(Notice::new(format!("Loading {plural}"))),
+                _ if status.visible > 0 => None,
+                _ => Some(self.panel().empty_notice(cx)),
+            },
+        }
+    }
+
+    /// The **No permission** state, which says where listing failed and what to try.
+    fn forbidden_notice(&self, name: &str, namespace: Option<String>, message: String) -> Notice {
+        let detail = if message.is_empty() {
+            "The API refused the list.".to_owned()
+        } else {
+            message
+        };
+        match namespace {
+            Some(namespace) => {
+                Notice::new(format!("You can't list {name} in {namespace}")).detail(detail)
             }
-            Session::Connected { .. } if table.visible_rows() > 0 => None,
-            Session::Connected { .. } => Some(no_rows_notice(table)),
+            None => {
+                let notice = Notice::new(format!("You can't list {name} across all namespaces"))
+                    .detail(format!("{detail}. Choose a namespace you can read."));
+                match &self.connection {
+                    Some(connection) => notice.action(
+                        NoticeAction::ShowContextNamespace,
+                        format!("Show namespace {}", connection.namespace),
+                    ),
+                    None => notice,
+                }
+            }
         }
     }
 
@@ -1002,7 +1133,10 @@ impl Root {
         let theme = cx.theme();
         match &self.session {
             Session::Connected { version, .. } => {
-                let failing = self.pods.read(cx).delegate().snapshot().error.is_some();
+                let failing = matches!(
+                    self.pod_table(cx).snapshot().error,
+                    Some(WatchError::Failed { .. })
+                );
                 if failing {
                     (theme.warning, "Updates failing", None)
                 } else {
@@ -1015,6 +1149,27 @@ impl Root {
                 (theme.muted_foreground, "Not connected", None)
             }
         }
+    }
+
+    /// What the sidebar shows for each view: its count once listed, and whether the API
+    /// refused it.
+    fn sidebar_items(&self, cx: &App) -> Vec<SidebarItem> {
+        View::ALL
+            .into_iter()
+            .map(|view| {
+                let status = self.panel_for(view).status(cx);
+                let listed = status.watching && status.synced && status.error.is_none();
+                let present = view == View::Pods || self.panels.iter().any(|p| p.view() == view);
+                SidebarItem {
+                    view,
+                    active: view == self.view,
+                    count: (present && listed).then_some(status.total),
+                    forbidden: present
+                        && status.watching
+                        && status.error.as_ref().is_some_and(WatchError::is_forbidden),
+                }
+            })
+            .collect()
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1112,9 +1267,10 @@ impl Root {
     }
 
     fn palette_source<'a>(&'a self, query: &'a str, cx: &'a App) -> PaletteSource<'a> {
-        let table = self.pods.read(cx).delegate();
+        let table = self.pod_table(cx);
         PaletteSource {
             query,
+            view: self.view,
             rows: &table.snapshot().rows,
             contexts: self
                 .contexts
@@ -1124,7 +1280,7 @@ impl Root {
             current_context: self.selected_context(cx),
             namespaces: table.namespaces(),
             namespace: table.namespace(),
-            has_selection: self.details.is_some(),
+            has_selection: self.panel().details().is_some(),
             has_tail: self.logs.is_some(),
             connected: self.connection.is_some(),
         }
@@ -1184,10 +1340,18 @@ impl Root {
     ) -> impl IntoElement + use<> {
         let compact = window.viewport_size().width < px(COMPACT_HEADER_BELOW);
         let hidden = self.hidden_columns(cx);
-        let table = self.pods.read(cx).delegate();
-        let targets = self.log_targets(cx);
-        let pods = distinct_pods(&targets);
-        let label = tail_label(pods, table.visible_rows());
+        let columns = self.panel().column_names();
+        let view = self.view;
+        let (label, can_tail): (SharedString, bool) = if view == View::Pods {
+            let targets = self.log_targets(cx);
+            let pods = distinct_pods(&targets);
+            let label = tail_label(pods, self.pod_table(cx).visible_rows());
+            (label.into(), pods > 0)
+        } else {
+            let workload = self.panel().selected_follow(cx).is_some();
+            ("Tail its pods".into(), workload)
+        };
+        let selector = self.panel().selector(cx);
         let muted = cx.theme().muted_foreground;
         h_flex()
             .h(px(PANEL_HEADER_HEIGHT))
@@ -1200,11 +1364,14 @@ impl Root {
             .text_sm()
             .when(!compact, |header| {
                 header
-                    .child(div().text_color(muted).child("Workloads"))
+                    .child(div().text_color(muted).child(view.group()))
                     .child(div().text_color(muted).child("/"))
             })
-            .child(div().font_medium().child("Pods"))
+            .child(div().font_medium().child(view.name()))
             .child(div().flex_1())
+            .when_some(selector, |header, selector| {
+                header.child(render_selector_chip(selector.label, cx))
+            })
             .child(
                 div().w(px(NAMESPACE_PICKER_WIDTH)).flex_shrink_0().child(
                     Select::new(&self.namespace_picker)
@@ -1225,7 +1392,7 @@ impl Root {
                             .id("pod-filter")
                             .small()
                             .prefix(Icon::new(IconName::Search).small().text_color(muted))
-                            .aria_label("Filter pods"),
+                            .aria_label(filter_placeholder(view)),
                     ),
             )
             .child(
@@ -1243,7 +1410,7 @@ impl Root {
                             }
                         })
                         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                            columns_menu(menu, &hidden)
+                            columns_menu(menu, &columns, &hidden)
                         }),
                 ),
             )
@@ -1254,8 +1421,14 @@ impl Root {
                         .outline()
                         .icon(Icon::new(IconName::ScrollText))
                         .label(label)
-                        .disabled(pods == 0 || self.connection.is_none())
-                        .on_click(cx.listener(|this, _, _, cx| this.tail_logs(cx))),
+                        .disabled(!can_tail || self.connection.is_none())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if view == View::Pods {
+                                this.tail_logs(cx);
+                            } else {
+                                this.tail_workload(cx);
+                            }
+                        })),
                 ),
             )
     }
@@ -1270,7 +1443,15 @@ impl Root {
             .justify_center()
             .gap_2()
             .p_6()
-            .child(div().font_medium().child(notice.title))
+            .child(
+                div()
+                    .id("notice-title")
+                    .test_support()
+                    .role(Role::Heading)
+                    .aria_label(notice.title.clone())
+                    .font_medium()
+                    .child(notice.title),
+            )
             .when_some(notice.detail, |content, detail| {
                 content.child(
                     div()
@@ -1297,27 +1478,71 @@ impl Root {
     }
 }
 
-fn columns_menu(menu: PopupMenu, hidden: &[&'static str]) -> PopupMenu {
-    column_names().fold(menu, |menu, name| {
+fn columns_menu(menu: PopupMenu, columns: &[&'static str], hidden: &[&'static str]) -> PopupMenu {
+    columns.iter().enumerate().fold(menu, |menu, (ix, &name)| {
         menu.menu_with_check_and_disabled(
             name,
             !hidden.contains(&name),
             Box::new(ToggleColumn { name }),
-            name == ALWAYS_SHOWN_COLUMN,
+            ix == 0,
         )
     })
 }
 
-fn no_rows_notice(table: &PodTable) -> Notice {
+fn filter_placeholder(view: View) -> String {
+    format!("Filter {}", view.name().to_lowercase())
+}
+
+fn owned(names: Vec<&str>) -> Vec<String> {
+    names.into_iter().map(str::to_owned).collect()
+}
+
+/// Says why a table has no rows, and offers what would bring some back.
+pub(crate) fn no_rows_notice<R: TableRow>(table: &ResourceTable<R>) -> Notice {
+    let plural = R::PLURAL;
     if let Some(namespace) = table.empty_namespace() {
-        return Notice::new(format!("No pods in {namespace}"))
+        return Notice::new(format!("No {plural} in {namespace}"))
             .action(NoticeAction::ShowAllNamespaces, "Show all namespaces");
     }
-    if table.filter().is_empty() {
-        return Notice::new("No pods in this cluster");
+    let filter = table.filter();
+    let selector = table.selector();
+    if filter.is_empty() && selector.is_none() {
+        return Notice::new(format!("No {plural} in this cluster"));
     }
-    Notice::new(format!("No pods match \"{}\"", table.filter()))
+    let what = match (filter, selector) {
+        ("", Some(selector)) => selector.label.clone(),
+        (filter, _) => format!("\"{filter}\""),
+    };
+    Notice::new(format!("No {plural} match {what}"))
         .action(NoticeAction::ClearFilter, "Clear filter")
+}
+
+/// The pill that says a label selector narrows the table, with a button that clears it.
+fn render_selector_chip(label: String, cx: &App) -> impl IntoElement + use<> {
+    h_flex()
+        .id("selector-filter")
+        .test_support()
+        .aria_label(format!("Showing pods of {label}"))
+        .flex_shrink_1()
+        .min_w_0()
+        .h(px(SEARCH_HEIGHT))
+        .pl_2()
+        .gap_1()
+        .items_center()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_xs()
+        .child(div().min_w_0().truncate().child(label))
+        .child(
+            Button::new("clear-selector")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::X))
+                .accessibility_label("Show all pods")
+                .tooltip("Show all pods")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ClearSelector), cx)),
+        )
 }
 
 fn connection_summary(connection: &Connection) -> String {
@@ -1463,8 +1688,7 @@ fn render_overlay(
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let table = self.pods.read(cx).delegate();
-        let pod_count = table.snapshot().synced.then(|| table.snapshot().rows.len());
+        let sidebar_items = self.sidebar_items(cx);
         let connection = self.render_connection(cx);
         let title_bar = self.render_title_bar(cx);
         let header = self.render_panel_header(window, cx);
@@ -1473,15 +1697,10 @@ impl Render for Root {
             None => div()
                 .flex_1()
                 .min_h_0()
-                .child(
-                    DataTable::new(&self.pods)
-                        .accessibility_label("Pods")
-                        .with_size(Size::Small)
-                        .bordered(false)
-                        .stripe(false),
-                )
+                .child(self.panel().table())
                 .into_any_element(),
         };
+        let details = self.panel().details();
         let dock = dock_height(window.viewport_size().height);
         let border = cx.theme().border;
         v_flex()
@@ -1617,6 +1836,19 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &OpenPod, window, cx| {
                 this.open_pod(action.key.clone(), window, cx);
             }))
+            .on_action(cx.listener(|this, action: &ShowView, window, cx| {
+                this.close_overlays(window, cx);
+                this.show_view(action.view, window, cx);
+                this.remember_state(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowPods, window, cx| {
+                this.close_overlays(window, cx);
+                this.show_workload_pods(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearSelector, _, cx| {
+                this.panel().set_selector(None, cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, action: &ToggleColumn, window, cx| {
                 this.toggle_column(action.name, cx);
                 this.remember_state(window, cx);
@@ -1640,7 +1872,7 @@ impl Render for Root {
                     .min_h_0()
                     .items_start()
                     .child(resource_sidebar(
-                        pod_count,
+                        &sidebar_items,
                         self.sidebar_collapsed,
                         connection,
                     ))
@@ -1660,7 +1892,7 @@ impl Render for Root {
                                         .min_h_0()
                                         .items_start()
                                         .child(v_flex().flex_1().min_w_0().h_full().child(content))
-                                        .when_some(self.details.clone(), |row, details| {
+                                        .when_some(details, |row, details| {
                                             row.child(
                                                 div()
                                                     .w(px(DETAILS_WIDTH))
@@ -1702,14 +1934,18 @@ mod tests {
     use crate::fake_api::{Fixture, kubeconfig, serve};
     use crate::logs::gap_text;
     use crate::pods::PodTable;
+    use crate::views::View;
 
+    use gpui_kit::SharedString;
     use gpui_kit::component::table::TableDelegate;
     use gpui_kit::test::{TestAppContextExt, TestQueryExt, TestWindowExt};
     use gpui_kit::{
         AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, Point, TestAppContext,
         WindowBounds, WindowOptions, px, size,
     };
-    use taffrail_core::{Backend, Contexts, Gap, LogTarget, PodRow, PodSnapshot, SavedState};
+    use taffrail_core::{
+        Backend, Contexts, Gap, LogTarget, PodRow, PodSnapshot, SavedState, WatchError,
+    };
 
     const POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const TWO_NAMESPACES_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"web","name":"front-1","resourceVersion":"1"},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
@@ -1726,6 +1962,8 @@ mod tests {
     const OWNED_POD_LIST_BODY: &str = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api-1","uid":"u1","resourceVersion":"1","labels":{"app":"api"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"api-7f9c","uid":"r","controller":true}]},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}},{"metadata":{"namespace":"shop","name":"web-1","uid":"u2","resourceVersion":"1","labels":{"app":"web"}},"spec":{"nodeName":"node-1","containers":[{"name":"app"}]},"status":{"phase":"Running"}}]}"#;
     const REPLICA_SET_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"api-7f9c","namespace":"shop","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"api","uid":"d","controller":true}]},"spec":{"selector":{"matchLabels":{"app":"api","pod-template-hash":"7f9c"}}}}"#;
     const DEPLOYMENT_BODY: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"api","namespace":"shop"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{}}}"#;
+    const DEPLOYMENT_LIST_BODY: &str = r#"{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"namespace":"shop","name":"api","resourceVersion":"1","generation":1},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"api"}},"template":{}},"status":{"observedGeneration":1,"replicas":1,"readyReplicas":1,"updatedReplicas":1,"availableReplicas":1}}]}"#;
+    const DEPLOYMENTS: &str = "/apis/apps/v1/deployments";
 
     fn serve_pods(pod_list: &str) -> String {
         serve_pods_with_logs(pod_list, LOG_BODY)
@@ -1738,6 +1976,7 @@ mod tests {
             events: EVENTS_BODY.into(),
             logs: logs.into(),
             live_logs: None,
+            forbidden: Vec::new(),
             reconnect_logs: None,
             objects: Vec::new(),
         })
@@ -1750,6 +1989,7 @@ mod tests {
             events: EVENTS_BODY.into(),
             logs: LOG_BODY.into(),
             live_logs: None,
+            forbidden: Vec::new(),
             reconnect_logs: None,
             objects: vec![
                 (
@@ -1766,6 +2006,31 @@ mod tests {
 
     fn serve_api() -> String {
         serve_pods(POD_LIST_BODY)
+    }
+
+    /// Pods owned by the `api` Deployment and one without a workload, and the Deployment.
+    /// `forbidden` lists paths the API refuses.
+    fn serve_deployments(forbidden: Vec<&'static str>) -> String {
+        serve(Fixture {
+            pod_list: OWNED_POD_LIST_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![
+                (DEPLOYMENTS.into(), DEPLOYMENT_LIST_BODY.into()),
+                (
+                    "/apis/apps/v1/namespaces/shop/deployments".into(),
+                    DEPLOYMENT_LIST_BODY.into(),
+                ),
+                (
+                    "/apis/apps/v1/namespaces/shop/deployments/api".into(),
+                    DEPLOYMENT_BODY.into(),
+                ),
+            ],
+        })
     }
 
     fn init(cx: &mut TestAppContext) {
@@ -2053,6 +2318,7 @@ users:
             events: EVENTS_BODY.into(),
             logs: "2026-01-01T00:00:00Z first\n2026-01-01T00:00:06Z second\n".into(),
             live_logs: None,
+            forbidden: Vec::new(),
             objects: Vec::new(),
             reconnect_logs: Some("2026-01-01T00:00:31Z after\n".into()),
         });
@@ -2696,8 +2962,8 @@ users:
 
         assert!(closed_root.upgrade().is_none());
         assert!(logs.upgrade().is_none());
-        // This test, then the kept window's Root and its session task.
-        assert_eq!(Arc::strong_count(&backend), 3);
+        // This test, then the kept window's Root.
+        assert_eq!(Arc::strong_count(&backend), 2);
         cx.update_window(kept, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
@@ -3112,7 +3378,7 @@ users:
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
             root.update(cx, |root, cx| {
-                let snapshot = root.pods.read(cx).delegate().snapshot().clone();
+                let snapshot = root.pods.table.read(cx).delegate().snapshot().clone();
                 root.show_pods(Arc::new(snapshot), window, cx);
             });
             window.render_frame(cx);
@@ -3198,12 +3464,12 @@ users:
     }
 
     fn headers(root: &Entity<Root>, cx: &mut TestAppContext) -> Vec<String> {
-        root.read_with(cx, |root, cx| root.pods.read(cx).headers(cx))
+        root.read_with(cx, |root, cx| root.pods.table.read(cx).headers(cx))
     }
 
     fn first_row(root: &Entity<Root>, cx: &mut TestAppContext) -> Vec<String> {
         root.read_with(cx, |root, cx| {
-            let table = root.pods.read(cx).delegate();
+            let table = root.pods.table.read(cx).delegate();
             (0..table.columns_count(cx))
                 .filter_map(|position| table.cell_label(0, position, cx))
                 .map(|cell| cell.to_string())
@@ -3345,7 +3611,7 @@ users:
         table
     }
 
-    fn notice_for(table: &PodTable) -> (String, Option<&'static str>) {
+    fn notice_for(table: &PodTable) -> (String, Option<SharedString>) {
         let notice = no_rows_notice(table);
         (
             notice.title.to_string(),
@@ -3359,7 +3625,10 @@ users:
         table.set_namespace(Some("payments".into()));
         assert_eq!(
             notice_for(&table),
-            ("No pods in payments".into(), Some("Show all namespaces"))
+            (
+                "No pods in payments".into(),
+                Some("Show all namespaces".into())
+            )
         );
     }
 
@@ -3370,7 +3639,7 @@ users:
         table.set_filter("web".into());
         assert_eq!(
             notice_for(&table),
-            ("No pods match \"web\"".into(), Some("Clear filter"))
+            ("No pods match \"web\"".into(), Some("Clear filter".into()))
         );
     }
 
@@ -3381,7 +3650,10 @@ users:
         table.set_filter("web".into());
         assert_eq!(
             notice_for(&table),
-            ("No pods in payments".into(), Some("Show all namespaces"))
+            (
+                "No pods in payments".into(),
+                Some("Show all namespaces".into())
+            )
         );
     }
 
@@ -3423,10 +3695,202 @@ users:
         snapshot.synced = true;
         assert_eq!(pod_status("Up", &snapshot), "Up. Pods: 0");
 
-        snapshot.error = Some("forbidden".into());
+        snapshot.error = Some(WatchError::Failed {
+            message: "forbidden".into(),
+        });
         assert_eq!(
             pod_status("Up", &snapshot),
             "Up. Pod watch failed: forbidden"
         );
+    }
+
+    async fn open_deployments(
+        forbidden: Vec<&'static str>,
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<Root>) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_deployments(forbidden), "dev"));
+        let (handle, root) = open_root(contexts, cx);
+        wait_for_pods(handle, cx).await;
+        (handle, root)
+    }
+
+    async fn wait_for_label(handle: AnyWindowHandle, label: &str, cx: &mut TestAppContext) {
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            !window.find_all_by_label(label).is_empty()
+        })
+        .await;
+    }
+
+    async fn wait_for_notice(handle: AnyWindowHandle, title: &str, cx: &mut TestAppContext) {
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window
+                .try_find("notice-title")
+                .is_some_and(|notice| notice.label() == Some(title))
+        })
+        .await;
+    }
+
+    fn press(handle: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn number_keys_and_the_palette_move_between_views(cx: &mut TestAppContext) {
+        let (handle, _) = open_deployments(Vec::new(), cx).await;
+
+        press(handle, "2", cx);
+        wait_for_label(handle, "Filter deployments", cx).await;
+        wait_for_label(handle, "api", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(window.find_all_by_label("1/1").len(), 1);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(OPEN_PALETTE_KEY, cx);
+            window.render_frame(cx);
+            window.input("Go to Pods", cx);
+        })
+        .unwrap();
+        press(handle, "enter", cx);
+        wait_for_label(handle, "web-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find_all_by_label("Filter pods").len(), 1);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_list_shows_no_permission_for_that_view_only(cx: &mut TestAppContext) {
+        let (handle, root) = open_deployments(vec![DEPLOYMENTS], cx).await;
+
+        press(handle, "2", cx);
+        wait_for_notice(
+            handle,
+            "You can't list Deployments across all namespaces",
+            cx,
+        )
+        .await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find("notice-action").label(),
+                Some("Show namespace default")
+            );
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| {
+            let locked: Vec<_> = root
+                .sidebar_items(cx)
+                .into_iter()
+                .filter(|item| item.forbidden)
+                .map(|item| item.view)
+                .collect();
+            assert_eq!(locked, [View::Deployments]);
+        });
+
+        press(handle, "1", cx);
+        wait_for_label(handle, "web-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(
+                window.find("status").label(),
+                Some("Connected to dev, server v1.35.0. Pods: 2")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_cluster_list_falls_back_to_the_chosen_namespace(cx: &mut TestAppContext) {
+        let (handle, root) = open_deployments(vec![DEPLOYMENTS], cx).await;
+        set_namespace(handle, &root, "shop", cx);
+
+        press(handle, "2", cx);
+        wait_for_label(handle, "api", cx).await;
+
+        set_namespace(handle, &root, "web", cx);
+        wait_for_notice(handle, "No deployments in web", cx).await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_deployment_opens_its_details_and_shows_its_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_deployments(Vec::new(), cx).await;
+        press(handle, "2", cx);
+        wait_for_label(handle, "api", cx).await;
+
+        press(handle, "j", cx);
+        cx.update_window(handle, |_, window, _| {
+            assert_eq!(window.find("details-title").label(), Some("api"));
+            assert_eq!(window.find("details").label(), Some("Deployment details"));
+            assert_eq!(window.find("show-its-pods").label(), Some("Show its pods"));
+        })
+        .unwrap();
+
+        press(handle, "p", cx);
+        wait_for_label(handle, "api-1", cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.find_all_by_label("web-1").is_empty());
+            assert_eq!(
+                window.find("selector-filter").label(),
+                Some("Showing pods of deployment/api")
+            );
+            window.click("clear-selector", cx);
+        })
+        .unwrap();
+        wait_for_label(handle, "web-1", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("selector-filter").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn the_w_key_follows_the_selected_deployments_pods(cx: &mut TestAppContext) {
+        let (handle, _) = open_deployments(Vec::new(), cx).await;
+        press(handle, "2", cx);
+        wait_for_label(handle, "api", cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "w", cx);
+
+        wait_for_log_summary(handle, "Following deployment/api", cx).await;
+    }
+
+    #[gpui_kit::test]
+    async fn restores_the_saved_view_and_its_columns(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let contexts = Contexts::from_yaml(&kubeconfig(&serve_deployments(Vec::new()), "dev"));
+        init(cx);
+        let saved = SavedState {
+            view: Some("Deployments".into()),
+            view_columns: [("Deployments".to_owned(), vec!["Age".to_owned()])].into(),
+            hidden_columns: vec!["Node".into()],
+            ..SavedState::default()
+        };
+        let backend = Arc::new(Backend::new().unwrap());
+        let (handle, root) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| Root::new(backend, contexts, saved, window, cx))
+            })
+            .unwrap()
+        });
+        wait_for_label(handle, "api", cx).await;
+
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(window.find_all_by_label("Filter deployments").len(), 1);
+            assert!(window.try_find(("sort", 6usize)).is_none());
+            let state = root.read(cx).saved_state(window, cx);
+            assert_eq!(state.view.as_deref(), Some("Deployments"));
+            assert_eq!(state.view_columns["Deployments"], ["Age"]);
+            assert_eq!(state.hidden_columns, ["Node"]);
+        })
+        .unwrap();
     }
 }

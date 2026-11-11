@@ -5,6 +5,7 @@ set -euo pipefail
 cluster="${SIM_CLUSTER:-taffrail}"
 nodes="${SIM_NODES:-100}"
 pods="${SIM_PODS:-5000}"
+deployments="${SIM_DEPLOYMENTS:-500}"
 log_rate="${SIM_LOG_RATE:-200}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 sim="$root/.sim"
@@ -43,11 +44,20 @@ YAML
 
   kwokctl --name="$cluster" scale node --replicas "$nodes"
   kwokctl --name="$cluster" scale pod --replicas "$pods"
+  add_deployments
 
   docker run -d --name "$generator" --network none \
     -v "$log_dir:$log_dir" -v "$root/scripts:/scripts:ro" python:3.13-alpine \
     python /scripts/gen-logs.py "$log_dir/app.log" --rate "$log_rate" >/dev/null
   status
+}
+
+# Deployments scaled to zero, so the Deployments table has rows without adding pods.
+add_deployments() {
+  local i
+  for ((i = 0; i < deployments; i++)); do
+    printf -- '---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: sim-deploy-%04d\nspec:\n  replicas: 0\n  selector:\n    matchLabels:\n      app: sim-deploy-%04d\n  template:\n    metadata:\n      labels:\n        app: sim-deploy-%04d\n    spec:\n      containers:\n      - name: app\n        image: busybox\n' "$i" "$i" "$i"
+  done | k apply -f - >/dev/null
 }
 
 down() {

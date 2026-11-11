@@ -25,21 +25,26 @@ The signature element is the log timeline, a strip above the log lines that show
 
 - The title bar and sidebar sit on the window canvas. Everything you work in sits in one raised panel with a hairline border, inset from the window edge.
 - The title bar holds the context picker, with a brass badge showing the context's first letter.
-- The sidebar lists resources by group, with a neutral pill on the current one, and collapses to an icon rail. Resources that don't exist yet stay disabled.
+- The sidebar lists resources by group, with a neutral pill on the current one, and collapses to an icon rail. Selecting a resource opens its view. Resources without a view yet stay disabled.
+- A resource shows its count once listed. A muted lock replaces the count when the API refused to list it, and the item's label adds **no permission**. Taffrail learns this from the list itself, and only for views it has opened. It does not ask the API in advance with a `SelfSubjectAccessReview`, because that is a create call and the app stays read-only.
 - The sidebar footer shows the connection. Anything that needs explaining appears in the panel, where there is room for a next step.
 - The details panel opens when you select a row, and closes with `Esc`.
 - The log dock stays open while you move between views. It can be resized or maximized.
 - Each window shows one context. Use **New window** to compare clusters.
 - **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
-- The app reopens where the last changed window was left, with its sidebar state, context, namespace and columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
+- The app reopens where the last changed window was left, with its sidebar state, context, namespace, view and each view's columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
 - This state lives in `taffrail/state.json` under the platform config directory. Apart from the context and namespace names, it holds nothing from a cluster.
 - **About Taffrail**, in the app menu and the palette, shows the version, the license, a link to the repository and a **Third-party licences** link. That link opens the notices file shipped with the app, or the project license online when there is none, such as under `cargo run`. `Esc` closes it.
 
 ## Resource tables
 
+Every resource view shows the same table, so what follows holds for each of them.
+
 - Rows have no dividers or stripes. Hover and selection separate them.
 - Rows that need attention lead by default: failed, then degraded, then healthy, then finished.
-- The namespace picker sits left of the filter and lists the namespaces in the cluster, with a search field. Both narrow the rows on the client, over one watch of all pods, so they narrow what a tail follows too.
+- The namespace picker sits left of the filter and lists the namespaces that hold pods or objects of the current view, with a search field. The picker and the filter are shared by every view. Both narrow the rows on the client, over one watch of each kind across all namespaces, so on the Pods view they narrow what a tail follows too.
+- If the API refuses a list across all namespaces, as it does for a role bound in one namespace, that kind's watch moves to the chosen namespace, and moves again when the choice changes. Other kinds keep their own watches.
+- Pods are watched for as long as a context is connected, because the palette, the sidebar count and log tails use them. Other kinds are watched only while their view is open, and stop when you leave it.
 - A chosen namespace stays chosen if it disappears, and the table shows the **No rows** state until it returns.
 - Filters hide rows but keep the selection, so the details panel stays open on a pod the filter hides.
 - **Columns** opens a menu with a check for each column. **Name** always shows. Hiding the sorted column returns to the default order.
@@ -49,20 +54,22 @@ The signature element is the log timeline, a strip above the log lines that show
 - Once you have scrolled, the row at the top of the view stays there while others move around it. At the very top of the list, new rows appear.
 - **Tail first 50 pods** follows the rows as shown, so sorting decides which pods are tailed.
 - Status shows a dot and a word in a colour, never colour alone.
+- **Deployments** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date, Available and Age. Status reads the Deployment's conditions and replica counts: **Stalled** (its rollout passed its progress deadline), **ReplicaFailure** and **Unavailable** are failed; **Progressing** is degraded; **Available** is healthy; **Paused** and **ScaledToZero** are finished.
+- **Show its pods**, or `p`, opens the Pods view narrowed to a workload's selector in its namespace. A pill in the panel header names it, such as **deployment/checkout-api**, and its button shows all pods again. **Clear filter** clears it too.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
 ## Details panel
 
 | Tab | Shows |
 |---|---|
-| Summary | Status, owner, node, containers, labels, and links to related objects |
+| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels |
 | Events | Recent events for this object, newest first |
 | YAML | Read-only YAML with coloured keys and **Copy YAML**, without `managedFields` |
 
-- The panel reads the pod when it opens, when its row changes, and every 10 seconds.
-- Moving the selection opens that pod's details, on the Summary tab.
-- If the pod is deleted, what was read stays visible with **This pod no longer exists. Showing what was last read.**
-- A role that can read pods but not events still sees the Summary and YAML, and the Events tab says why it is empty.
+- The panel reads the object when it opens, when its row changes, and every 10 seconds.
+- Moving the selection opens that object's details, on the Summary tab. Leaving a view closes its details.
+- If the object is deleted, what was read stays visible with **This pod no longer exists. Showing what was last read.**, naming its kind.
+- A role that can read an object but not events still sees the Summary and YAML, and the Events tab says why it is empty.
 
 ## Log explorer
 
@@ -74,6 +81,7 @@ The signature element is the log timeline, a strip above the log lines that show
 - The stored line stays as the container wrote it, with its Kubernetes timestamp, and the screen reader label reads it whole.
 - The source column is hidden when you follow one pod.
 - Sources get a stable colour from a fixed set, and always keep their name.
+- On a workload view, **Tail its pods**, `w` or `l` follows the selected workload's pods by its selector, such as **Following deployment/checkout-api**.
 - **Tail its workload**, or `w`, follows the selected pod's controller: a Deployment, StatefulSet, DaemonSet, Job or ReplicaSet. A pod owned by a ReplicaSet follows the ReplicaSet's Deployment, so a rollout's new ReplicaSet is included.
 - Typing a label selector such as `app=checkout-api` in the palette offers **Tail pods matching app=checkout-api**, in the chosen namespace.
 - A followed tail adds pods that match as they appear and drops pods once they are deleted, over the same pod watch as the table. The header names what it follows: **Following deployment/checkout-api · 6 pods · 1,240 lines kept**.
@@ -124,12 +132,14 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `⌘N` / `Ctrl+N` | Open a new window |
 | `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
+| `1` `2` | Go to Pods or Deployments. Each view keeps its own digit, in sidebar order: `3` StatefulSets, `4` DaemonSets, `5` Jobs, `6` Nodes, `7` Namespaces and `8` Events as they arrive |
 | `/` | Filter the current view |
 | `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
 | `l` | Tail logs for the selection |
-| `w` | Tail the selected pod's workload |
+| `w` | Tail the selected pod's workload, or the selected workload's pods |
+| `p` | Show the selected workload's pods |
 | `s` | Show the summary |
 | `y` | Show YAML |
 | `e` | Show events |
@@ -146,7 +156,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 - `⌘K`, or the search field in the title bar, opens the palette over the panel.
 - Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Text with a selector operator, such as `=`, `!=`, `in` or `!`, also offers to tail the pods it matches. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
 - Choosing a pod selects it and opens its details. If the filter or namespace hid it, both clear first.
-- Below the pods, the palette lists the commands that apply now, then contexts and namespaces, with a check on the current ones.
+- Below the pods, the palette lists the commands that apply now, including **Go to Pods** and **Go to Deployments**, then contexts and namespaces, with a check on the current ones.
 - Every command dispatches the same action as its key or button.
 - `Esc` clears the search, then closes the palette.
 - `?` opens the list of shortcuts, which `Esc` closes.
@@ -160,9 +170,10 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Can't connect | **Can't reach staging**, with the error and **Try again**. |
 | Login needed | **Waiting for login to staging.** Finish signing in in your browser or terminal. |
 | Connection lost | **Reconnecting to staging.** Tables show their last data, marked with the time it was last updated. |
-| No permission | **You can't list Secrets in this namespace.** The rest of the app keeps working. |
-| No rows | **No pods in `payments`.** Offer **Show all namespaces**. |
-| No matches | **No pods match "web".** Offer **Clear filter**. |
+| No permission | **You can't list Deployments in payments**, with the API's reason. Across all namespaces it reads **You can't list Deployments across all namespaces**, asks you to choose a namespace you can read, and offers **Show namespace default** for the context's namespace. Only that view is affected, and the rest of the app keeps working. |
+| Kind not served | **This cluster doesn't serve Deployments**, with the API's reason. |
+| No rows | **No pods in `payments`.** Offer **Show all namespaces**. Each view names its own kind, such as **No deployments in `payments`**. |
+| No matches | **No pods match "web"**, or **No pods match deployment/checkout-api** for a workload's pods. Offer **Clear filter**. |
 | No matching lines | **No lines match "timeout"**, or **No lines at ERROR** for a severity alone, once every stored line has been checked. Offer **Clear filter**, which also resets the severity. |
 | Invalid filter | **/(timeout/ is not a valid regular expression**, in `error` in place of the count. |
 | Logs not started | The log dock stays closed, and **Tail 12 pods** sits beside the filter. It reads **Tail first 50 pods** when the limit applies. |

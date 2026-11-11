@@ -6,12 +6,14 @@ use gpui_kit::*;
 use taffrail_core::{Following, LogReader};
 
 use crate::root::Root;
+use crate::views::View;
 
 const HIDDEN_WINDOW: &str =
     "Invalid run: frames stopped. Check the connection, and keep the window uncovered";
 const SECONDS_VARIABLE: &str = "TAFFRAIL_BENCH_SECONDS";
 const TAIL_VARIABLE: &str = "TAFFRAIL_BENCH_TAIL";
 const FOLLOW_VARIABLE: &str = "TAFFRAIL_BENCH_FOLLOW";
+const VIEW_VARIABLE: &str = "TAFFRAIL_BENCH_VIEW";
 const DEFAULT_SECONDS: u64 = 30;
 const ROWS_PER_FRAME: usize = 3;
 const READY_POLL: Duration = Duration::from_millis(100);
@@ -59,9 +61,19 @@ pub fn run((window, root): (AnyWindowHandle, Entity<Root>), cx: &mut App) {
             process::exit(1);
         })
         .detach();
+    if let Some(view) = env::var(VIEW_VARIABLE)
+        .ok()
+        .and_then(|name| View::from_name(&name))
+    {
+        window
+            .update(cx, |_, window, cx| {
+                root.update(cx, |root, cx| root.show_view(view, window, cx));
+            })
+            .expect("bench window should stay open");
+    }
     cx.spawn(async move |cx| {
         let rows = loop {
-            let ready = root.read_with(cx, |root, cx| root.synced_pod_count(cx));
+            let ready = root.read_with(cx, |root, cx| root.synced_row_count(cx));
             if let Some(rows) = ready.filter(|rows| *rows > 0) {
                 break rows;
             }
@@ -118,7 +130,7 @@ fn measure_next_frame(mut run: Run, window: &mut Window, _: &mut App) {
         }
         run.row = (run.row + ROWS_PER_FRAME) % run.rows;
         let row = run.row;
-        run.root.update(cx, |root, cx| root.scroll_pods_to(row, cx));
+        run.root.update(cx, |root, cx| root.scroll_rows_to(row, cx));
         measure_next_frame(run, window, cx);
     });
 }

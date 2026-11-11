@@ -11,6 +11,7 @@ use crate::cluster::ClusterError;
 use crate::logs::{LogTarget, MAX_TAIL_PODS};
 use crate::pods::{PodKey, PodRow, PodSnapshot};
 use crate::selector::Selector;
+use crate::watch::Row;
 
 /// Pods chosen by a selector rather than by name, so that pods which appear later join.
 #[derive(Clone, Debug, PartialEq, Eq)]

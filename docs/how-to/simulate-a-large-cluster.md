@@ -37,6 +37,7 @@ scripts/sim-cluster.sh churn
 | `SIM_CLUSTER` | `taffrail` | Cluster name; the context is `kwok-<name>`. Clusters with different names can run together |
 | `SIM_NODES` | `100` | Fake nodes, each holding up to 110 pods |
 | `SIM_PODS` | `5000` | Fake pods |
+| `SIM_DEPLOYMENTS` | `500` | Deployments scaled to zero, which fill the Deployments table without adding pods |
 | `SIM_LOG_RATE` | `200` | Lines per second in the shared log file |
 | `SIM_CHURN_PODS` | `500` | Pods in the churn Deployment |
 

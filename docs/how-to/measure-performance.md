@@ -10,7 +10,7 @@ Start a [simulated cluster](simulate-a-large-cluster.md), then run:
 scripts/bench.sh
 ```
 
-Each run scrolls the pod table three rows per frame while pods churn: once alone, once with a log tail across 50 pods, and once following the churning Deployment's pods with `app=sim-churn`, so pods join and leave the tail during rollouts. It prints two JSON lines per run:
+Each run scrolls a table three rows per frame while pods churn: the pod table once alone, once with a log tail across 50 pods, and once following the churning Deployment's pods with `app=sim-churn`, so pods join and leave the tail during rollouts; then the Deployments table, whose rows change with each rollout. It prints two JSON lines per run:
 
 | Output | Meaning |
 |---|---|
@@ -100,3 +100,4 @@ scripts/sample-process-tree.py <pid> [<pid> ...] --seconds 20
 | `TAFFRAIL_BENCH_SECONDS` | `30` | How long to scroll |
 | `TAFFRAIL_BENCH_TAIL` | `1` | Set to `0` to skip the log tail |
 | `TAFFRAIL_BENCH_FOLLOW` | Empty | A label selector to follow instead of tailing the first 50 pods |
+| `TAFFRAIL_BENCH_VIEW` | Empty | A view to scroll instead of Pods, such as `Deployments` |

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,12 @@ pub struct SavedState {
     pub sidebar_collapsed: bool,
     pub context: Option<String>,
     pub namespace: Option<String>,
+    /// The pod table's hidden columns.
     pub hidden_columns: Vec<String>,
+    /// The resource view last open, such as `Deployments`.
+    pub view: Option<String>,
+    /// Hidden columns of the other resource views, by view.
+    pub view_columns: BTreeMap<String, Vec<String>>,
 }
 
 /// A rectangle in logical pixels.
@@ -89,6 +95,7 @@ impl WindowRect {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use tempfile::tempdir;
@@ -120,6 +127,8 @@ mod tests {
             context: Some("staging".into()),
             namespace: Some("payments".into()),
             hidden_columns: vec!["Node".into()],
+            view: Some("Deployments".into()),
+            view_columns: BTreeMap::from([("Deployments".into(), vec!["Age".into()])]),
         }
     }
 

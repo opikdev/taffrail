@@ -5,7 +5,7 @@ use gpui_kit::component::Theme;
 use gpui_kit::*;
 use taffrail_core::{Level, LevelCounts, TimelineView};
 
-use crate::pods::format_count;
+use crate::table::format_count;
 
 /// The strip's height, with its bars and the row of times and legend below them.
 pub const TIMELINE_HEIGHT: f32 = 46.;

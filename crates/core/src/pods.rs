@@ -1,22 +1,19 @@
 use std::collections::BTreeMap;
-use std::pin::pin;
 use std::sync::Arc;
-use std::time::Duration;
 
-use futures::{Stream, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
-use kube::runtime::WatchStreamExt;
-use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::logs::{LogTarget, MAX_TAIL_PODS};
+use crate::watch::{Feed, ObjectKey, ResourceWatch, Row, Snapshot, namespaced_api};
 
-const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
-
-pub type PodKey = (String, String);
-type PodRows = BTreeMap<PodKey, Arc<PodRow>>;
+pub type PodKey = ObjectKey;
+/// Pods at one moment, sorted by namespace and name.
+pub type PodSnapshot = Snapshot<PodRow>;
+/// The newest pods from a running watch, for anything that follows pods as they change.
+pub type PodFeed = Feed<PodRow>;
+/// A running pod watch. Dropping it stops the watch.
+pub type PodWatch = ResourceWatch<PodRow>;
 
 /// The object that controls a pod, such as its ReplicaSet.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,22 +39,10 @@ pub struct PodRow {
     pub owner: Option<Owner>,
 }
 
-impl PodRow {
-    /// What identifies this pod across updates, as its row moves or changes.
-    pub fn key(&self) -> PodKey {
-        (self.namespace.clone(), self.name.clone())
-    }
+impl Row for PodRow {
+    type Object = Pod;
 
-    /// Whether `filter` appears in `namespace/name`, ignoring case.
-    pub fn matches(&self, filter: &str) -> bool {
-        format!("{}/{}", self.namespace, self.name)
-            .to_lowercase()
-            .contains(&filter.to_lowercase())
-    }
-}
-
-impl From<&Pod> for PodRow {
-    fn from(pod: &Pod) -> Self {
+    fn from_object(pod: &Pod) -> Self {
         let containers = pod
             .status
             .as_ref()
@@ -107,6 +92,24 @@ impl From<&Pod> for PodRow {
                 }),
         }
     }
+
+    fn api(client: Client, namespace: Option<&str>) -> Api<Pod> {
+        namespaced_api(client, namespace)
+    }
+
+    fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl From<&Pod> for PodRow {
+    fn from(pod: &Pod) -> Self {
+        Self::from_object(pod)
+    }
 }
 
 fn display_status(pod: &Pod) -> String {
@@ -131,36 +134,6 @@ fn display_status(pod: &Pod) -> String {
         .unwrap_or_else(|| "Unknown".to_owned())
 }
 
-/// Pods at one moment, sorted by namespace and name.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PodSnapshot {
-    pub rows: Vec<Arc<PodRow>>,
-    pub synced: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Default)]
-struct PodState {
-    rows: PodRows,
-    relisting: Option<PodRows>,
-    synced: bool,
-    error: Option<String>,
-}
-
-impl PodSnapshot {
-    /// The row for `key`, if the pod still exists.
-    pub fn find(&self, key: &PodKey) -> Option<&Arc<PodRow>> {
-        let (namespace, name) = key;
-        self.rows
-            .binary_search_by(|row| {
-                (row.namespace.as_str(), row.name.as_str())
-                    .cmp(&(namespace.as_str(), name.as_str()))
-            })
-            .ok()
-            .map(|ix| &self.rows[ix])
-    }
-}
-
 /// Log targets for the first `MAX_TAIL_PODS` of `rows`.
 pub fn log_targets<'a>(rows: impl IntoIterator<Item = &'a Arc<PodRow>>) -> Vec<LogTarget> {
     rows.into_iter()
@@ -175,123 +148,10 @@ pub fn log_targets<'a>(rows: impl IntoIterator<Item = &'a Arc<PodRow>>) -> Vec<L
         .collect()
 }
 
-impl PodState {
-    fn record(&mut self, event: watcher::Result<Event<Pod>>) {
-        match event {
-            Ok(event) => {
-                self.error = None;
-                self.apply(event);
-            }
-            Err(error) => self.error = Some(error.to_string()),
-        }
-    }
-
-    fn apply(&mut self, event: Event<Pod>) {
-        match event {
-            Event::Apply(pod) => {
-                let row = PodRow::from(&pod);
-                self.rows.insert(row.key(), Arc::new(row));
-            }
-            Event::Delete(pod) => {
-                self.rows.remove(&PodRow::from(&pod).key());
-            }
-            Event::Init => self.relisting = Some(PodRows::new()),
-            Event::InitApply(pod) => {
-                let row = PodRow::from(&pod);
-                self.relisting
-                    .get_or_insert_default()
-                    .insert(row.key(), Arc::new(row));
-            }
-            Event::InitDone => {
-                self.rows = self.relisting.take().unwrap_or_default();
-                self.synced = true;
-            }
-        }
-    }
-
-    fn snapshot(&self) -> PodSnapshot {
-        PodSnapshot {
-            rows: self.rows.values().cloned().collect(),
-            synced: self.synced,
-            error: self.error.clone(),
-        }
-    }
-}
-
-/// Publishes at most once per interval, and not at all while the stream is quiet.
-async fn publish(
-    events: impl Stream<Item = watcher::Result<Event<Pod>>>,
-    snapshots: watch::Sender<Arc<PodSnapshot>>,
-) {
-    let mut events = pin!(events);
-    let mut state = PodState::default();
-    while let Some(event) = events.next().await {
-        state.record(event);
-        let mut deadline = pin!(tokio::time::sleep(PUBLISH_INTERVAL));
-        let mut ended = false;
-        while !ended {
-            tokio::select! {
-                () = &mut deadline => break,
-                event = events.next() => match event {
-                    Some(event) => state.record(event),
-                    None => ended = true,
-                },
-            }
-        }
-        if snapshots.send(Arc::new(state.snapshot())).is_err() {
-            return;
-        }
-    }
-}
-
-/// The newest pods from a running watch, for anything that follows pods as they change.
-#[derive(Clone)]
-pub struct PodFeed(pub(crate) watch::Receiver<Arc<PodSnapshot>>);
-
-/// A running pod watch. Dropping it stops the watch.
-pub struct PodWatch {
-    snapshots: watch::Receiver<Arc<PodSnapshot>>,
-    task: JoinHandle<()>,
-}
-
-impl PodWatch {
-    /// Waits for the newest snapshot, or returns `None` if the watch has ended.
-    pub async fn next(&mut self) -> Option<Arc<PodSnapshot>> {
-        self.snapshots.changed().await.ok()?;
-        Some(self.snapshots.borrow_and_update().clone())
-    }
-
-    /// Shares this watch, so a log tail can follow pods without a watch of its own.
-    pub fn feed(&self) -> PodFeed {
-        PodFeed(self.snapshots.clone())
-    }
-}
-
-impl Drop for PodWatch {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-pub(crate) fn watch(client: Client) -> PodWatch {
-    let (sender, snapshots) = watch::channel(Arc::default());
-    let events = watcher::watcher(Api::<Pod>::all(client), watcher::Config::default());
-    let task = tokio::spawn(publish(events.default_backoff(), sender));
-    PodWatch { snapshots, task }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use serde_json::json;
-    use tokio::sync::mpsc;
-
-    fn channel_stream<T>(receiver: mpsc::UnboundedReceiver<T>) -> impl Stream<Item = T> {
-        stream::unfold(receiver, |mut receiver| async move {
-            receiver.recv().await.map(|item| (item, receiver))
-        })
-    }
 
     fn pod(namespace: &str, name: &str) -> Pod {
         serde_json::from_value(json!({
@@ -300,18 +160,14 @@ mod tests {
         .unwrap()
     }
 
-    fn names(snapshot: &PodSnapshot) -> Vec<&str> {
-        snapshot.rows.iter().map(|row| row.name.as_str()).collect()
-    }
-
-    fn listed(pods: Vec<Pod>) -> PodState {
-        let mut state = PodState::default();
-        state.apply(Event::Init);
-        for pod in pods {
-            state.apply(Event::InitApply(pod));
+    fn listed(pods: Vec<Pod>) -> PodSnapshot {
+        let mut rows: Vec<_> = pods.iter().map(|pod| Arc::new(PodRow::from(pod))).collect();
+        rows.sort_by_key(|row| row.key());
+        PodSnapshot {
+            rows,
+            synced: true,
+            error: None,
         }
-        state.apply(Event::InitDone);
-        state
     }
 
     #[test]
@@ -423,8 +279,7 @@ mod tests {
         let snapshot = listed(vec![
             pod_with_containers("api", &["app", "proxy"]),
             pod_with_containers("web", &["app"]),
-        ])
-        .snapshot();
+        ]);
 
         let targets = log_targets(snapshot.rows.iter().rev());
 
@@ -436,135 +291,13 @@ mod tests {
     }
 
     #[test]
-    fn find_locates_a_pod_by_namespace_and_name() {
-        let snapshot = listed(vec![pod("b", "api"), pod("a", "web"), pod("a", "api")]).snapshot();
-        let key = ("a".to_owned(), "web".to_owned());
-        assert_eq!(snapshot.find(&key).unwrap().name, "web");
-        assert!(snapshot.find(&("c".to_owned(), "api".to_owned())).is_none());
-    }
-
-    #[test]
     fn log_targets_stop_at_the_pod_limit() {
         let pods = (0..MAX_TAIL_PODS + 5)
             .map(|index| pod_with_containers(&format!("pod-{index:03}"), &["app"]))
             .collect();
 
-        let targets = log_targets(&listed(pods).snapshot().rows);
+        let targets = log_targets(&listed(pods).rows);
 
         assert_eq!(targets.len(), MAX_TAIL_PODS);
-    }
-
-    #[test]
-    fn rows_stay_hidden_until_the_list_finishes() {
-        let mut state = PodState::default();
-        state.apply(Event::Init);
-        state.apply(Event::InitApply(pod("shop", "api")));
-
-        let snapshot = state.snapshot();
-
-        assert!(snapshot.rows.is_empty());
-        assert!(!snapshot.synced);
-    }
-
-    #[test]
-    fn rows_sort_by_namespace_then_name() {
-        let state = listed(vec![pod("b", "a"), pod("a", "z"), pod("a", "b")]);
-
-        let snapshot = state.snapshot();
-        let keys: Vec<_> = snapshot
-            .rows
-            .iter()
-            .map(|row| (row.namespace.as_str(), row.name.as_str()))
-            .collect();
-
-        assert_eq!(keys, [("a", "b"), ("a", "z"), ("b", "a")]);
-        assert!(snapshot.synced);
-    }
-
-    #[test]
-    fn apply_and_delete_update_rows() {
-        let mut state = listed(vec![pod("a", "old")]);
-
-        state.apply(Event::Apply(pod("a", "new")));
-        state.apply(Event::Delete(pod("a", "old")));
-
-        assert_eq!(names(&state.snapshot()), ["new"]);
-    }
-
-    #[test]
-    fn a_relist_drops_pods_deleted_during_a_disconnect() {
-        let mut state = listed(vec![pod("a", "gone"), pod("a", "kept")]);
-
-        state.apply(Event::Init);
-        state.apply(Event::InitApply(pod("a", "kept")));
-        assert_eq!(names(&state.snapshot()), ["gone", "kept"]);
-        state.apply(Event::InitDone);
-
-        assert_eq!(names(&state.snapshot()), ["kept"]);
-    }
-
-    #[test]
-    fn an_error_keeps_rows_and_clears_on_the_next_event() {
-        let mut state = listed(vec![pod("a", "api")]);
-
-        state.record(Err(watcher::Error::NoResourceVersion));
-        let failed = state.snapshot();
-        state.record(Ok(Event::Apply(pod("a", "web"))));
-        let recovered = state.snapshot();
-
-        assert_eq!(names(&failed), ["api"]);
-        assert!(failed.error.is_some());
-        assert_eq!(recovered.error, None);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_burst_of_events_publishes_one_snapshot() {
-        let (events, received) = mpsc::unbounded_channel();
-        let (sender, mut snapshots) = watch::channel(Arc::default());
-        let task = tokio::spawn(publish(channel_stream(received), sender));
-
-        events.send(Ok(Event::Init)).unwrap();
-        for index in 0..1000 {
-            events
-                .send(Ok(Event::InitApply(pod("a", &format!("pod-{index}")))))
-                .unwrap();
-        }
-        events.send(Ok(Event::InitDone)).unwrap();
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        assert!(snapshots.has_changed().unwrap());
-        assert_eq!(snapshots.borrow_and_update().rows.len(), 1000);
-
-        tokio::time::sleep(PUBLISH_INTERVAL * 10).await;
-
-        assert!(
-            !snapshots.has_changed().unwrap(),
-            "idle stream must not publish"
-        );
-        task.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn publishes_the_final_events_when_the_stream_ends() {
-        let events = stream::iter(vec![Ok(Event::Init), Ok(Event::InitDone)]);
-        let (sender, mut snapshots) = watch::channel(Arc::default());
-
-        publish(events, sender).await;
-
-        assert!(snapshots.borrow_and_update().synced);
-    }
-
-    #[tokio::test]
-    async fn dropping_a_watch_stops_its_task() {
-        let (sender, snapshots) = watch::channel(Arc::default());
-        let task = tokio::spawn(async move {
-            sender.closed().await;
-        });
-        let abort = task.abort_handle();
-
-        drop(PodWatch { snapshots, task });
-        tokio::task::yield_now().await;
-
-        assert!(abort.is_finished());
     }
 }

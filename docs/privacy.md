@@ -22,7 +22,7 @@ Taffrail contacts nothing else.
 
 ## What stays on your computer
 
-- **Window state**, in `taffrail/state.json` under your config folder, listed under [Remove everything](#remove-everything). It holds the window's position and size, the display it was on, whether the sidebar is collapsed, the last context and namespace names, and which columns you hid. It holds nothing else from a cluster.
+- **Window state**, in `taffrail/state.json` under your config folder, listed under [Remove everything](#remove-everything). It holds the window's position and size, the display it was on, whether the sidebar is collapsed, the last context and namespace names, the last resource view, and which columns you hid in each view. It holds nothing else from a cluster.
 - **Log lines you tail**, in unnamed temporary files, at most 1 GiB for each tail. The system deletes them once Taffrail no longer needs them, or when it quits, even after a crash.
 - **What you copy.** **Copy YAML** puts a pod's YAML on your clipboard, and `⌘C` or `Ctrl+C` copies the log lines you selected. Taffrail only does this when you ask.
 - **Log lines you export.** **Export lines** writes the lines in view to a file you choose in a save dialog. Taffrail never writes an export anywhere else, and deletes a partial file if the export stops.

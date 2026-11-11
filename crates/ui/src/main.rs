@@ -1,6 +1,7 @@
 mod about;
 #[cfg(feature = "bench")]
 mod bench;
+mod deployments;
 mod details;
 #[cfg(any(test, feature = "preview"))]
 mod fake_api;
@@ -12,8 +13,10 @@ mod preview;
 mod root;
 mod rows;
 mod sidebar;
+mod table;
 mod theme;
 mod timeline;
+mod views;
 mod windows;
 
 use std::path::PathBuf;
