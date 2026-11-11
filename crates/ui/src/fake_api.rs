@@ -46,7 +46,7 @@ users:
     )
 }
 
-/// The message Kubernetes RBAC gives for a list it refuses at `path`.
+/// The message Kubernetes RBAC gives for a list or a read it refuses at `path`.
 pub fn forbidden_message(path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let (group, rest) = match parts.as_slice() {
@@ -54,21 +54,31 @@ pub fn forbidden_message(path: &str) -> String {
         ["apis", group, _, rest @ ..] => (*group, rest),
         _ => ("", &[][..]),
     };
-    let (scope, resource) = match rest {
+    let (scope, resource, name) = match rest {
+        ["namespaces", namespace, resource, name] => (
+            format!("in the namespace \"{namespace}\""),
+            *resource,
+            Some(*name),
+        ),
         ["namespaces", namespace, resource] => {
-            (format!("in the namespace \"{namespace}\""), *resource)
+            (format!("in the namespace \"{namespace}\""), *resource, None)
         }
-        [resource] => ("at the cluster scope".to_owned(), *resource),
-        _ => (String::new(), ""),
+        [resource] => ("at the cluster scope".to_owned(), *resource, None),
+        _ => (String::new(), "", None),
     };
     let qualified = if group.is_empty() {
         resource.to_owned()
     } else {
         format!("{resource}.{group}")
     };
-    format!(
-        r#"{qualified} is forbidden: User "jane" cannot list resource "{resource}" in API group "{group}" {scope}"#
-    )
+    match name {
+        Some(name) => format!(
+            r#"{qualified} "{name}" is forbidden: User "jane" cannot get resource "{resource}" in API group "{group}" {scope}"#
+        ),
+        None => format!(
+            r#"{qualified} is forbidden: User "jane" cannot list resource "{resource}" in API group "{group}" {scope}"#
+        ),
+    }
 }
 
 fn respond_forbidden(mut stream: &TcpStream, path: &str) {

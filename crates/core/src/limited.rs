@@ -117,6 +117,10 @@ async fn limited_user() {
     };
     println!("Events of {}: {events}", pod.name);
     assert!(
+        events.starts_with(r#"events is forbidden: User "#),
+        "{events}"
+    );
+    assert!(
         events.contains(r#"cannot list resource "events""#),
         "{events}"
     );
@@ -127,7 +131,8 @@ async fn limited_user() {
         panic!("expected the workload read to be refused, got {workload:?}");
     };
     println!("Workload of {}: {workload}: {error}", pod.name);
-    assert!(error.contains("forbidden"), "{error}");
+    assert!(error.starts_with("replicasets.apps "), "{error}");
+    assert!(error.contains("is forbidden: User "), "{error}");
 
     let targets: Vec<LogTarget> = listed
         .rows

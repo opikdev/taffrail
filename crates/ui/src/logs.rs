@@ -1300,6 +1300,10 @@ impl Render for LogPane {
                             .id("log-summary")
                             .test_support()
                             .aria_label(summary.clone())
+                            .tooltip({
+                                let summary = summary.clone();
+                                move |window, cx| Tooltip::new(summary.clone()).build(window, cx)
+                            })
                             .flex_1()
                             .min_w_0()
                             .truncate()

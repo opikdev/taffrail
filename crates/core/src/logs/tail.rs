@@ -20,6 +20,7 @@ use super::store::{Gap, LogLine, LogStore, Record};
 use super::timeline::TimelineView;
 use crate::follow::{Follow, Member};
 use crate::pods::{PodFeed, PodKey, PodSnapshot};
+use crate::reason::reason;
 
 pub const MAX_TAIL_PODS: usize = 50;
 
@@ -711,7 +712,7 @@ impl Follower {
                 }
                 End::Failed(error) => {
                     failed = true;
-                    error.to_string()
+                    format!("can't read the log, retrying: {}", reason(&error))
                 }
             };
             if self.stored > stored {
@@ -742,7 +743,7 @@ impl Follower {
                 return;
             }
         }
-        let note = format!("[taffrail: {error}]");
+        let note = format!("[taffrail: {}]", reason(error));
         self.send(Record::note(self.source, note.into_bytes()))
             .await;
     }
@@ -1427,6 +1428,28 @@ mod tests {
             stored
                 .iter()
                 .any(|line| line.timestamp.is_none() && line.text.contains(text))
+        }
+
+        #[tokio::test]
+        async fn a_failed_log_and_a_gone_pod_say_the_apis_reason_in_a_note() {
+            let script = Script {
+                logs: vec![Log::Fails(403)],
+                pods: vec![running(0, "2026-01-01T00:00:00Z"), PodState::Gone],
+                ..Script::default()
+            };
+            let is_note = |stored: &[LogLine], text: &str| {
+                stored
+                    .iter()
+                    .any(|line| line.timestamp.is_none() && line.text == text)
+            };
+
+            tail_until(script, |_, stored| {
+                is_note(
+                    stored,
+                    "[taffrail: can't read the log, retrying: status 403]",
+                ) && is_note(stored, "[taffrail: status 404]")
+            })
+            .await;
         }
 
         #[tokio::test]

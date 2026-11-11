@@ -133,7 +133,10 @@ impl<R: Inspect> DetailsPane<R> {
     }
 
     fn show(&mut self, details: Result<R::Details, ClusterError>, cx: &mut Context<Self>) {
-        let details = details.map_err(|error| SharedString::from(error.to_string()));
+        let details = details.map_err(|error| match error {
+            ClusterError::ReadObject { error, .. } => SharedString::from(error),
+            error => SharedString::from(error.to_string()),
+        });
         if self.details.as_ref() == Some(&details) {
             return;
         }
@@ -455,6 +458,9 @@ pub fn message(title: &str, detail: Option<&str>, cx: &App) -> AnyElement {
         .when_some(detail, |content, detail| {
             content.child(
                 div()
+                    .id("details-message")
+                    .test_support()
+                    .aria_label(detail.to_owned())
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(detail.to_owned()),

@@ -18,6 +18,8 @@ use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::reason::watch_reason;
+
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 const FORBIDDEN: u16 = 403;
 const NOT_FOUND: u16 = 404;
@@ -103,7 +105,7 @@ impl WatchError {
                 message: status.message.clone(),
             },
             _ => Self::Failed {
-                message: error.to_string(),
+                message: watch_reason(error),
             },
         }
     }
@@ -537,7 +539,12 @@ mod tests {
                 message: "not found".into()
             }
         );
-        assert!(matches!(failed, WatchError::Failed { .. }));
+        assert_eq!(
+            failed,
+            WatchError::Failed {
+                message: "broken".into()
+            }
+        );
         assert_eq!(forbidden.to_string(), "no list");
     }
 

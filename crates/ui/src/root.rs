@@ -222,6 +222,18 @@ pub(crate) enum NoticeAction {
     ShowContextNamespace,
 }
 
+/// Whether the window may still choose the context's namespace for the user, because the
+/// API refused to list pods across all namespaces, or has chosen it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum ContextNamespace {
+    #[default]
+    Off,
+    /// Waiting for the first pod list of this connection.
+    Armed(String),
+    /// Chosen, until the user chooses a namespace or another context.
+    Chosen(String),
+}
+
 /// Where the user was before following a link, for **Back** to return to.
 #[derive(Clone)]
 struct Place {
@@ -299,6 +311,7 @@ pub struct Root {
     session: Session,
     sidebar_collapsed: bool,
     saved_context: Option<String>,
+    context_namespace: ContextNamespace,
     connect_task: Option<Task<()>>,
     _picker_events: Option<Subscription>,
     _filter_events: Subscription,
@@ -396,6 +409,7 @@ impl Root {
             session: Session::ChooseContext,
             sidebar_collapsed,
             saved_context,
+            context_namespace: ContextNamespace::Off,
             connect_task: None,
             _picker_events: None,
             _filter_events: filter_events,
@@ -504,6 +518,9 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if view == View::Pods {
+            self.choose_context_namespace(window, cx);
+        }
         if view == View::Pods || view == self.view {
             self.update_namespace_options(window, cx);
         }
@@ -579,13 +596,23 @@ impl Root {
         let state = SavedState {
             context,
             sidebar_collapsed: self.sidebar_collapsed,
-            namespace: self.namespace(cx),
+            namespace: self.chosen_namespace(cx),
             hidden_columns: owned(self.pods.hidden_columns(cx)),
             view: Some(self.view.name().to_owned()),
             view_columns: self.view_columns(cx),
             ..SavedState::default()
         };
         windows::with_placement(state, window, cx)
+    }
+
+    /// The namespace the user chose. One the window chose for them is not saved, so a context
+    /// that may list across namespaces still opens on all of them.
+    fn chosen_namespace(&self, cx: &App) -> Option<String> {
+        let namespace = self.namespace(cx);
+        match &self.context_namespace {
+            ContextNamespace::Chosen(chosen) if namespace.as_ref() == Some(chosen) => None,
+            _ => namespace,
+        }
     }
 
     fn remember_state(&self, window: &Window, cx: &mut App) {
@@ -600,6 +627,7 @@ impl Root {
             context: context.clone(),
         };
         self.connection = None;
+        self.context_namespace = ContextNamespace::Off;
         self.logs = None;
         self.log_note = None;
         self.workload_task = None;
@@ -634,6 +662,9 @@ impl Root {
                     summary: connection_summary(&connection),
                     version: connection.server_version.clone(),
                 };
+                if connection.names_namespace && this.namespace(cx).is_none() {
+                    this.context_namespace = ContextNamespace::Armed(connection.namespace.clone());
+                }
                 this.connection = Some(connection);
                 this.start_view(View::Pods, window, cx);
                 this.start_view(this.view, window, cx);
@@ -941,6 +972,26 @@ impl Root {
         cx.notify();
     }
 
+    /// Moves to the context's namespace when the first pod list of a connection is refused
+    /// across all namespaces, as it is for a role bound in one namespace.
+    fn choose_context_namespace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ContextNamespace::Armed(namespace) = &self.context_namespace else {
+            return;
+        };
+        let namespace = namespace.clone();
+        let snapshot = self.pod_table(cx).snapshot();
+        match &snapshot.error {
+            Some(WatchError::Forbidden {
+                namespace: None, ..
+            }) => {
+                self.set_namespace(Some(namespace.clone()), window, cx);
+                self.context_namespace = ContextNamespace::Chosen(namespace);
+            }
+            None if snapshot.synced => self.context_namespace = ContextNamespace::Off,
+            _ => {}
+        }
+    }
+
     /// Selects the object a link or **Back** asked for, once its view has listed it. If the
     /// API refuses the list across all namespaces, the view moves to the object's namespace
     /// first. If it refuses that too, the view shows its **No permission** state.
@@ -1144,6 +1195,7 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.context_namespace = ContextNamespace::Off;
         self.pods.set_namespace(namespace.clone(), cx);
         for panel in &self.panels {
             panel.set_namespace(namespace.clone(), cx);
@@ -1314,6 +1366,16 @@ impl Root {
                     None => notice,
                 }
             }
+        }
+    }
+
+    /// Says why the window shows the namespace it chose for the user.
+    fn context_namespace_note(&self) -> Option<String> {
+        match &self.context_namespace {
+            ContextNamespace::Chosen(namespace) => Some(format!(
+                "Showing {namespace}, the namespace your context names, because you can't list pods across all namespaces."
+            )),
+            _ => None,
         }
     }
 
@@ -1721,6 +1783,20 @@ pub(crate) fn no_rows_notice<R: TableRow>(table: &ResourceTable<R>) -> Notice {
         .action(NoticeAction::ClearFilter, "Clear filter")
 }
 
+/// A muted line above the table that says why the window chose its namespace.
+fn render_context_namespace_note(note: String, cx: &App) -> impl IntoElement + use<> {
+    div()
+        .id("context-namespace-note")
+        .test_support()
+        .aria_label(note.clone())
+        .flex_shrink_0()
+        .px_3()
+        .py_1p5()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(note)
+}
+
 /// The pill that says a label selector narrows the table, with a button that clears it.
 fn render_selector_chip(label: String, cx: &App) -> impl IntoElement + use<> {
     h_flex()
@@ -1904,6 +1980,12 @@ impl Render for Root {
                 .child(self.panel().table())
                 .into_any_element(),
         };
+        let content = v_flex()
+            .size_full()
+            .when_some(self.context_namespace_note(), |column, note| {
+                column.child(render_context_namespace_note(note, cx))
+            })
+            .child(content);
         let details = self.panel().details();
         let dock = dock_height(window.viewport_size().height);
         let border = cx.theme().border;
@@ -2150,7 +2232,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BACK_KEY, OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice, pod_status, tail_label,
+        BACK_KEY, ContextNamespace, OPEN_PALETTE_KEY, Root, distinct_pods, no_rows_notice,
+        pod_status, tail_label,
     };
     use crate::fake_api::{Fixture, kubeconfig, serve};
     use crate::logs::gap_text;
@@ -3153,6 +3236,149 @@ users:
         .unwrap();
 
         wait_for_log_summary(handle, "api-1 has no workload to follow", cx).await;
+    }
+
+    const REPLICA_SET_PATH: &str = "/apis/apps/v1/namespaces/shop/replicasets/api-7f9c";
+
+    /// Pods and their logs in `shop`, refusing `forbidden` and anything else the role lacks.
+    fn serve_limited(forbidden: Vec<&'static str>) -> String {
+        serve(Fixture {
+            pod_list: OWNED_POD_LIST_BODY.into(),
+            pod: POD_BODY.into(),
+            events: EVENTS_BODY.into(),
+            logs: LOG_BODY.into(),
+            live_logs: None,
+            forbidden,
+            reconnect_logs: None,
+            objects: vec![(
+                "/api/v1/namespaces/shop/pods".into(),
+                OWNED_POD_LIST_BODY.into(),
+            )],
+        })
+    }
+
+    /// A kubeconfig whose context `dev` names `namespace`.
+    fn kubeconfig_in(server: &str, namespace: &str) -> String {
+        kubeconfig(server, "dev").replacen(
+            "      user: dev\n",
+            &format!("      user: dev\n      namespace: {namespace}\n"),
+            1,
+        )
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_workload_says_why_in_the_log_dock(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_limited(vec![REPLICA_SET_PATH]);
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "w", cx);
+
+        wait_for_log_summary(
+            handle,
+            r#"Can't read replicaset/api-7f9c to find its pods. Press l to tail this pod alone. The API says: replicasets.apps "api-7f9c" is forbidden: User "jane" cannot get resource "replicasets" in API group "apps" in the namespace "shop""#,
+            cx,
+        )
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn refused_events_say_the_apis_reason(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_limited(vec!["/api/v1/namespaces/shop/events"]);
+        let handle = open(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+        wait_for_pods(handle, cx).await;
+
+        press(handle, "j", cx);
+        press(handle, "e", cx);
+
+        cx.wait_for(handle, Duration::from_secs(10), |window, _| {
+            window.try_find("details-message").is_some_and(|message| {
+                message.label()
+                    == Some(
+                        r#"events is forbidden: User "jane" cannot list resource "events" in API group "" in the namespace "shop""#,
+                    )
+            })
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn a_refused_cluster_pod_list_shows_the_contexts_namespace(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_limited(vec!["/api/v1/pods"]);
+        let contexts = Contexts::from_yaml(&kubeconfig_in(&server, "shop"));
+        let (handle, root) = open_root(contexts, cx);
+
+        wait_for_label(handle, "api-1", cx).await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("context-namespace-note").label(),
+                Some(
+                    "Showing shop, the namespace your context names, because you can't list pods across all namespaces."
+                )
+            );
+            assert!(window.try_find("notice-title").is_none());
+            let state = root.read(cx).saved_state(window, cx);
+            assert_eq!(state.namespace, None);
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx).as_deref(), Some("shop"));
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            root.update(cx, |root, cx| root.set_namespace(None, window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        wait_for_notice(handle, "You can't list Pods across all namespaces", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("context-namespace-note").is_none());
+            assert_eq!(
+                window.find("notice-action").label(),
+                Some("Show namespace shop")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_context_without_a_namespace_keeps_the_no_permission_state(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_limited(vec!["/api/v1/pods"]);
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig(&server, "dev")), cx);
+
+        wait_for_notice(handle, "You can't list Pods across all namespaces", cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("context-namespace-note").is_none());
+            assert_eq!(
+                window.find("notice-action").label(),
+                Some("Show namespace default")
+            );
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| assert_eq!(root.namespace(cx), None));
+    }
+
+    #[gpui_kit::test]
+    async fn a_user_who_can_list_across_namespaces_stays_on_all_of_them(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = serve_limited(Vec::new());
+        let (handle, root) = open_root(Contexts::from_yaml(&kubeconfig_in(&server, "shop")), cx);
+
+        wait_for_pods(handle, cx).await;
+        cx.update_window(handle, |_, window, _| {
+            assert!(window.try_find("context-namespace-note").is_none());
+        })
+        .unwrap();
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.namespace(cx), None);
+            assert_eq!(root.context_namespace, ContextNamespace::Off);
+        });
     }
 
     #[gpui_kit::test]
