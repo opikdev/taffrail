@@ -7,10 +7,10 @@
 //! chunk at a time, and context keeps a window of `2 * REACH` lines.
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -134,7 +134,7 @@ fn start(export: Export, path: PathBuf) -> LogExport {
     let started = thread::Builder::new()
         .name("taffrail-log-export".to_owned())
         .spawn(move || {
-            let written = File::create(&path).and_then(|file| {
+            let written = create(&path).and_then(|file| {
                 let mut out = BufWriter::with_capacity(WRITE_BUFFER, file);
                 export.write(&mut out, &stop, &sender)?;
                 out.flush()
@@ -158,6 +158,16 @@ fn start(export: Export, path: PathBuf) -> LogExport {
         return LogExport { progress, cancel };
     }
     LogExport { progress, cancel }
+}
+
+/// Creates or truncates `path`. A new file is readable by its owner alone on Unix, like the
+/// store's own files, because log lines can hold anything a container prints.
+fn create(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
 }
 
 /// The stored lines kept around the match being written, with their text.
@@ -511,6 +521,21 @@ mod tests {
             expected,
             "bytes stay as written"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_export_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("all.log");
+        let reader = reader(vec![Record::new(0, b"line".to_vec())]);
+
+        finish(reader.export(path.clone())).await;
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[tokio::test]

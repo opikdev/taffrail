@@ -205,6 +205,20 @@ mod tests {
         assert_eq!(loaded.context, None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_file_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("taffrail").join("state.json");
+
+        state().save(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
     #[test]
     fn a_failed_save_returns_an_error() {
         let directory = tempdir().unwrap();

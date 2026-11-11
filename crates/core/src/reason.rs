@@ -3,6 +3,8 @@
 
 use std::error::Error;
 
+use kube::client::AuthError;
+use kube::config::KubeconfigError;
 use kube::core::Status;
 use kube::runtime::watcher;
 
@@ -38,8 +40,53 @@ pub(crate) fn status_reason(status: &Status) -> String {
     }
 }
 
-/// An error and each of its causes that adds something, joined with colons.
+/// Why a kubeconfig could not be read or used.
+pub(crate) fn kubeconfig_reason(error: &KubeconfigError) -> String {
+    causes(error)
+}
+
+/// The words for an error whose text quotes credentials, or `None` if it quotes none. A
+/// login plugin's command line holds its environment, and its output can hold a token. A
+/// YAML error quotes the lines around it, which in a kubeconfig can hold keys and tokens.
+fn redacted(error: &(dyn Error + 'static)) -> Option<String> {
+    match error.downcast_ref::<AuthError>() {
+        Some(AuthError::AuthExecRun { out, .. }) => {
+            let ended = match out.status.code() {
+                Some(code) => format!("the login plugin exited with code {code}"),
+                None => "the login plugin stopped before it finished".to_owned(),
+            };
+            return Some(format!(
+                "{ended}. Run kubectl with this context in a terminal to see its message"
+            ));
+        }
+        Some(AuthError::AuthExecParse(_)) => {
+            return Some("the login plugin printed a credential that could not be read".to_owned());
+        }
+        _ => {}
+    }
+    match error.downcast_ref::<KubeconfigError>() {
+        Some(KubeconfigError::Parse(error)) => Some(match error.location() {
+            Some(at) => format!(
+                "the YAML is not valid at line {}, column {}",
+                at.line(),
+                at.column()
+            ),
+            None => "the YAML is not valid".to_owned(),
+        }),
+        _ => None,
+    }
+}
+
+/// An error and each of its causes that adds something, joined with colons. Each error's
+/// text repeats its causes, so one that quotes credentials replaces the whole chain.
 fn causes(error: &(dyn Error + 'static)) -> String {
+    let mut link = Some(error);
+    while let Some(cause) = link {
+        if let Some(text) = redacted(cause) {
+            return text;
+        }
+        link = cause.source();
+    }
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -125,5 +172,32 @@ mod tests {
         assert!(!reason.contains("Error:"), "{reason}");
         assert!(!reason.contains('{'), "{reason}");
         assert!(reason.to_lowercase().contains("connect"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_login_plugin_behind_other_errors_shows_no_secrets() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let failed = kube::client::AuthError::AuthExecRun {
+            cmd: r#"AWS_SECRET_ACCESS_KEY="env-secret" "aws""#.to_owned(),
+            out: Box::new(Output {
+                status: ExitStatus::from_raw(255 << 8),
+                stdout: b"out-token".to_vec(),
+                stderr: b"err-secret".to_vec(),
+            }),
+        };
+        let error = kube::Error::Service(Box::new(kube::Error::Auth(failed)));
+
+        let reason = reason(&error);
+
+        assert!(
+            reason.starts_with("the login plugin exited with code 255"),
+            "{reason}"
+        );
+        for secret in ["env-secret", "out-token", "err-secret"] {
+            assert!(!reason.contains(secret), "{reason}");
+        }
     }
 }

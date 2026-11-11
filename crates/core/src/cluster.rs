@@ -15,26 +15,22 @@ use crate::environment::{self, ShellEnvironment};
 use crate::follow::{self, Follow};
 use crate::logs::{self, LogTail, LogTarget};
 use crate::pods::{PodFeed, PodRow};
-use crate::reason::reason;
+use crate::reason::{kubeconfig_reason, reason};
 use crate::watch::{self, ResourceWatch, Row};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_THREADS: usize = 2;
 
+/// The client's errors are kept only as words, because their text and debug output can
+/// quote credentials. See [`crate::reason`].
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterError {
     #[error("Failed to read kubeconfig: {0}")]
-    ReadKubeconfig(#[source] KubeconfigError),
-    #[error("Failed to load context \"{context}\": {source}")]
-    LoadContext {
-        context: String,
-        source: KubeconfigError,
-    },
-    #[error("Failed to reach context \"{context}\": {}", reason(.source))]
-    Connect {
-        context: String,
-        source: kube::Error,
-    },
+    ReadKubeconfig(String),
+    #[error("Failed to load context \"{context}\": {reason}")]
+    LoadContext { context: String, reason: String },
+    #[error("Failed to reach context \"{context}\": {reason}")]
+    Connect { context: String, reason: String },
     #[error("Context \"{0}\" did not respond within {CONNECT_TIMEOUT:?}")]
     Timeout(String),
     #[error("Connection task for context \"{context}\" failed: {source}")]
@@ -72,13 +68,13 @@ impl Contexts {
     fn load_in(environment: &ShellEnvironment) -> Result<Self, ClusterError> {
         read_kubeconfig(environment)
             .map(|kubeconfig| Self { kubeconfig }.with_environment(environment))
-            .map_err(ClusterError::ReadKubeconfig)
+            .map_err(|error| ClusterError::ReadKubeconfig(kubeconfig_reason(&error)))
     }
 
     pub fn from_yaml(yaml: &str) -> Result<Self, ClusterError> {
         Kubeconfig::from_yaml(yaml)
             .map(|kubeconfig| Self { kubeconfig })
-            .map_err(ClusterError::ReadKubeconfig)
+            .map_err(|error| ClusterError::ReadKubeconfig(kubeconfig_reason(&error)))
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -152,9 +148,9 @@ impl Contexts {
             .is_some();
         let config = Config::from_custom_kubeconfig(self.kubeconfig, &options)
             .await
-            .map_err(|source| ClusterError::LoadContext {
+            .map_err(|error| ClusterError::LoadContext {
                 context: context.clone(),
-                source,
+                reason: kubeconfig_reason(&error),
             })?;
         let namespace = config.default_namespace.clone();
         let request = async {
@@ -165,9 +161,9 @@ impl Contexts {
         let (client, version) = tokio::time::timeout(CONNECT_TIMEOUT, request)
             .await
             .map_err(|_| ClusterError::Timeout(context.clone()))?
-            .map_err(|source| ClusterError::Connect {
+            .map_err(|error| ClusterError::Connect {
                 context: context.clone(),
-                source,
+                reason: reason(&error),
             })?;
         Ok(Connection {
             context,
@@ -567,5 +563,87 @@ users:
         };
 
         assert!(error.to_string().contains("\"dev\""), "{error}");
+    }
+
+    /// Every secret the failing plugin could reveal: the login shell's, the kubeconfig's
+    /// and the plugin's own output.
+    #[cfg(unix)]
+    const PLUGIN_SECRETS: [&str; 4] = [
+        "shell-secret",
+        "kubeconfig-secret",
+        "out-token",
+        "err-secret",
+    ];
+
+    #[cfg(unix)]
+    async fn connect_with_plugin(script: &str) -> ClusterError {
+        let environment = ShellEnvironment::from_pairs([
+            ("PATH", "/usr/bin:/bin"),
+            ("AWS_SECRET_ACCESS_KEY", "shell-secret"),
+        ]);
+        let exec = format!(
+            r#"
+      exec:
+        apiVersion: client.authentication.k8s.io/v1
+        command: sh
+        args: ["-c", "{script}"]
+        env:
+          - name: AWS_SESSION_TOKEN
+            value: kubeconfig-secret
+        interactiveMode: Never
+"#
+        );
+        let contexts = Contexts::from_yaml(&kubeconfig("http://127.0.0.1:1", &exec))
+            .unwrap()
+            .with_environment(&environment);
+        let Err(error) = contexts.connect("dev".into()).await else {
+            panic!("a failing exec plugin should not connect");
+        };
+        error
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_exec_plugin_shows_its_exit_code_and_no_secrets() {
+        let error = connect_with_plugin(
+            "echo out-token; echo err-secret >&2; echo $AWS_SECRET_ACCESS_KEY; exit 3",
+        )
+        .await;
+
+        let text = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(text.contains("exited with code 3"), "{text}");
+        for secret in PLUGIN_SECRETS {
+            assert!(!text.contains(secret), "{text}");
+            assert!(!debug.contains(secret), "{debug}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreadable_exec_plugin_output_is_not_shown() {
+        let error = connect_with_plugin("echo '{status: {token: out-token'").await;
+
+        let text = error.to_string();
+        assert!(text.contains("could not be read"), "{text}");
+        assert!(
+            !format!("{error}{error:?}").contains("out-token"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_kubeconfig_yaml_says_where_without_quoting_it() {
+        let yaml =
+            "users:\n- name: dev\n  user:\n    token: yaml-token\n    client-key-data: [yaml-key\n";
+
+        let Err(error) = Contexts::from_yaml(yaml) else {
+            panic!("invalid YAML should not load");
+        };
+
+        let shown = format!("{error}{error:?}");
+        assert!(error.to_string().contains("line 5"), "{error}");
+        assert!(!shown.contains("yaml-token"), "{shown}");
+        assert!(!shown.contains("yaml-key"), "{shown}");
     }
 }
