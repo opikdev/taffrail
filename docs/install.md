@@ -29,7 +29,7 @@ If macOS says Taffrail is damaged, the download is broken. Download it again, an
 
 ## Windows
 
-Download `taffrail_<VERSION>_x64-setup.exe`, or `taffrail_<VERSION>_x64_en-US.msi` if your company installs apps that way. The `-setup.exe` installs for your user only, into `%LOCALAPPDATA%\Taffrail`, and doesn't need an administrator.
+Download `taffrail_<VERSION>_x64-setup.exe`, or `taffrail_<VERSION>_x64_en-US.msi` if your company installs apps that way. The `-setup.exe` installs for your user only, into `%LOCALAPPDATA%\Taffrail`, and doesn't need an administrator. The `.msi` installs for every user, into `C:\Program Files\Taffrail`, and needs one. Both add Taffrail to the Start menu.
 
 1. Open the installer. If Windows says it protected your PC, click **More info**, then **Run anyway**.
 2. Follow the installer.
@@ -40,9 +40,9 @@ Download `taffrail_<VERSION>_x64-setup.exe`, or `taffrail_<VERSION>_x64_en-US.ms
 |---|---|---|
 | Ubuntu, Debian | `taffrail_<VERSION>_amd64.deb` | `sudo apt install ./taffrail_<VERSION>_amd64.deb` |
 | Any other | `taffrail_<VERSION>_x86_64.AppImage` | `chmod +x taffrail_<VERSION>_x86_64.AppImage`, then open it |
-| Any other, without AppImage | `taffrail_<VERSION>_x86_64.tar.gz` | `tar -xzf taffrail_<VERSION>_x86_64.tar.gz`, then run `taffrail` in the folder it makes |
+| Any other, without AppImage | `taffrail_<VERSION>_x86_64.tar.gz` | `tar -xzf taffrail_<VERSION>_x86_64.tar.gz`, then run `taffrail` in the `taffrail_<VERSION>_x86_64` folder it makes |
 
-The `.deb` adds Taffrail to your app launcher. If the AppImage doesn't open, install FUSE 2, which is `libfuse2t64` on Ubuntu 24.04 or later, or run it with `--appimage-extract-and-run`.
+The `.deb` adds Taffrail to your app launcher. If the AppImage doesn't open, install FUSE, which is the `fuse3` package on most systems, or run it with `--appimage-extract-and-run`.
 
 ## Opening Taffrail from the Dock or a launcher
 
@@ -55,7 +55,7 @@ If a context still says it can't find a login plugin, set `KUBECONFIG` and `PATH
 | Your system | Uninstall |
 |---|---|
 | macOS | Drag Taffrail from Applications to the Trash |
-| Windows | Open **Settings → Apps → Installed apps**, find Taffrail, and choose **Uninstall** |
+| Windows | Open **Settings → Apps → Installed apps**, or **Apps & features** on Windows 10, find Taffrail, and choose **Uninstall** |
 | Ubuntu, Debian | `sudo apt remove taffrail` |
 | AppImage or `.tar.gz` | Delete the file or folder |
 
