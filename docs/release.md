@@ -42,7 +42,7 @@ If a release went out on an `untagged-...` tag, run the same command without `bo
 
 ## Build installers without a release
 
-Run the workflow from the Actions tab, or with `gh workflow run release.yml --ref <BRANCH>`. The installers are attached to the run as artifacts, and no release is created.
+Run the workflow from the Actions tab, or with `gh workflow run release.yml --ref <BRANCH>`. It runs the same checks, attaches the installers to the run as three artifacts, `macos`, `windows` and `linux`, and creates no release. To download them, run `gh run download <RUN_ID>`.
 
 ## Signing
 
