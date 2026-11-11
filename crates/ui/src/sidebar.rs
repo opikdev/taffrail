@@ -71,8 +71,8 @@ pub fn resource_sidebar(
     items: &[SidebarItem],
     collapsed: bool,
     footer: impl IntoElement,
-) -> Sidebar<SidebarGroup<SidebarMenu>> {
-    Sidebar::new("resources")
+) -> impl IntoElement {
+    let sidebar = Sidebar::new("resources")
         .w(px(SIDEBAR_WIDTH))
         .collapsed(collapsed)
         .border_r_0()
@@ -88,14 +88,12 @@ pub fn resource_sidebar(
                         forbidden,
                     }) = items.iter().find(|item| item.view.name() == name)
                     else {
-                        return item.disable(true);
-                    };
-                    let label = match forbidden {
-                        true => format!("{name}, no permission"),
-                        false => name.to_owned(),
+                        return item
+                            .disable(true)
+                            .accessibility_label(item_label(name, None, false, false));
                     };
                     item.active(active)
-                        .accessibility_label(label)
+                        .accessibility_label(item_label(name, count, forbidden, true))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(Box::new(ShowView { view }), cx);
                         })
@@ -113,5 +111,43 @@ pub fn resource_sidebar(
                         })
                 }),
             ))
-        }))
+        }));
+    // The items are tree items, so a screen reader wants a tree around them.
+    div()
+        .id("resource-tree")
+        .test_support()
+        .role(Role::Tree)
+        .aria_label("Resources")
+        .h_full()
+        .flex_shrink_0()
+        .child(sidebar)
+}
+
+/// What a screen reader reads for a sidebar item, which shows its count or lock beside it.
+fn item_label(name: &str, count: Option<usize>, forbidden: bool, has_view: bool) -> String {
+    match (has_view, forbidden, count) {
+        (false, _, _) => format!("{name}, not available yet"),
+        (true, true, _) => format!("{name}, no permission"),
+        (true, false, Some(count)) => format!("{name}, {}", format_count(count)),
+        (true, false, None) => name.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_label;
+
+    #[test]
+    fn an_item_reads_its_count_or_why_it_has_none() {
+        assert_eq!(item_label("Pods", Some(1_204), false, true), "Pods, 1,204");
+        assert_eq!(item_label("Pods", None, false, true), "Pods");
+        assert_eq!(
+            item_label("Deployments", Some(3), true, true),
+            "Deployments, no permission"
+        );
+        assert_eq!(
+            item_label("CronJobs", None, false, false),
+            "CronJobs, not available yet"
+        );
+    }
 }

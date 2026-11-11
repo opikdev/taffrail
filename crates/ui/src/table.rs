@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::table::{Column, TableDelegate, TableEvent, TableState};
+use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -417,12 +417,13 @@ impl<R: TableRow> ResourceTable<R> {
         self.selected_row = self.selected.is_some().then_some(row_ix);
     }
 
-    /// Selects the row `delta` away from the selection, or the first row if there is none.
-    /// Returns the row now selected.
+    /// Selects the row `delta` away from the selection, or the first row if there is none,
+    /// or the last for `isize::MAX`. Returns the row now selected.
     pub fn move_selection(&mut self, delta: isize) -> Option<usize> {
         let last = self.rows.len().checked_sub(1)?;
         let row_ix = match self.selected_row {
             Some(row_ix) => row_ix.saturating_add_signed(delta).min(last),
+            None if delta == isize::MAX => last,
             None => 0,
         };
         self.select_row(row_ix);
@@ -464,6 +465,24 @@ impl<R: TableRow> ResourceTable<R> {
                 .iter()
                 .position(|row| row.namespace() == namespace && row.name() == name)
         });
+    }
+
+    /// What a screen reader reads for a row: each shown cell after its column's name, except
+    /// a name, which reads alone, such as `api-1, Namespace shop, Status Running`.
+    pub(crate) fn row_label(&self, row_ix: usize) -> String {
+        (0..R::COLUMNS.len())
+            .filter(|col_ix| !self.hidden[*col_ix])
+            .filter_map(|col_ix| {
+                let text = self.cell(row_ix, col_ix);
+                let name = R::COLUMNS[col_ix].name;
+                match name {
+                    _ if text.is_empty() => None,
+                    "Name" => Some(text.to_string()),
+                    name => Some(format!("{name} {text}")),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn cell(&self, row_ix: usize, col_ix: usize) -> SharedString {
@@ -538,7 +557,52 @@ pub fn show_in_place<R: TableRow>(
     if let Some(moved_to) = moved_to {
         handle.set_offset(point(offset.x, anchored_offset(offset.y, top, moved_to)));
     }
+    mirror_selection(table, cx);
     cx.notify();
+}
+
+/// Says a row was clicked, which selects it and opens its details.
+pub struct RowClicked;
+
+impl<R: TableRow> EventEmitter<RowClicked> for TableState<ResourceTable<R>> {}
+
+/// Changes the table, then shows its selection.
+pub fn change<R: TableRow, T>(
+    table: &mut TableState<ResourceTable<R>>,
+    cx: &mut Context<TableState<ResourceTable<R>>>,
+    update: impl FnOnce(&mut ResourceTable<R>) -> T,
+) -> T {
+    let changed = update(table.delegate_mut());
+    mirror_selection(table, cx);
+    cx.notify();
+    changed
+}
+
+/// Copies the selection into GPUI Kit's own, which marks the row selected for screen
+/// readers and makes it the focused node while the table has focus. The table stays where
+/// it is scrolled, because the selection moves only where the caller scrolls it.
+fn mirror_selection<R: TableRow>(
+    table: &mut TableState<ResourceTable<R>>,
+    cx: &mut Context<TableState<ResourceTable<R>>>,
+) {
+    let selected = table.delegate().selected_row;
+    if table.selected_row() == selected {
+        return;
+    }
+    let scroll = table
+        .vertical_scroll_handle
+        .0
+        .borrow()
+        .deferred_scroll_to_item;
+    match selected {
+        Some(row_ix) => table.set_selected_row(row_ix, cx),
+        None => table.clear_selection(cx),
+    }
+    table
+        .vertical_scroll_handle
+        .0
+        .borrow_mut()
+        .deferred_scroll_to_item = scroll;
 }
 
 /// Groups thousands, such as `5,500`.
@@ -642,25 +706,26 @@ impl<R: TableRow> TableDelegate for ResourceTable<R> {
                 )
             })
             .on_click(cx.listener(move |table, _, _, cx| {
-                table.delegate_mut().cycle_sort(col_ix);
-                cx.notify();
+                change(table, cx, |table| table.cycle_sort(col_ix));
             }))
     }
 
     fn render_tr(
         &mut self,
         row_ix: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let selected = self.selected_row == Some(row_ix);
+        // GPUI Kit gives the row its role, index and selected state. The label is read only
+        // through the accessibility tree, so it is built only while one is.
+        let label = (window.is_a11y_active() || cfg!(any(test, feature = "preview")))
+            .then(|| self.row_label(row_ix));
         div()
             .id(("row", row_ix))
-            .when(selected, |row| row.bg(cx.theme().sidebar_accent))
+            .when_some(label, |row, label| row.aria_label(label))
             .on_click(cx.listener(move |table, _, _, cx| {
-                table.delegate_mut().select_row(row_ix);
-                cx.emit(TableEvent::SelectRow(row_ix));
-                cx.notify();
+                change(table, cx, |table| table.select_row(row_ix));
+                cx.emit(RowClicked);
             }))
     }
 

@@ -700,6 +700,7 @@ impl LogPane {
             div()
                 .id("log-filter-count")
                 .test_support()
+                .role(Role::Status)
                 .aria_label(label)
                 .min_w_0()
                 .truncate()
@@ -722,6 +723,7 @@ impl LogPane {
             v_flex()
                 .id("log-notice")
                 .test_support()
+                .role(Role::Status)
                 .aria_label(title.clone())
                 .flex_1()
                 .min_h_0()
@@ -756,7 +758,9 @@ impl LogPane {
     }
 
     /// A row of the dock: a line, a gap, or a separator between blocks of context.
-    fn render_row(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
+    /// `focused` says whether the lines have focus, so the line the arrows move from is the
+    /// one a screen reader reads.
+    fn render_row(&self, row: Row, focused: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = row.id;
         let RowKind::Line { line, matched } = row.kind else {
             return self.render_separator(id, cx);
@@ -772,7 +776,9 @@ impl LogPane {
         };
         let theme = cx.theme();
         element
+            .role(Role::ListBoxOption)
             .aria_selected(selected)
+            .when(head && focused, |row| row.aria_active_descendant())
             // The band reaches into the padding, so its text lines up with the times.
             .mx(px(-GAP_INSET))
             .pr(px(GAP_INSET))
@@ -802,6 +808,7 @@ impl LogPane {
         h_flex()
             .id(("log-separator", id.key))
             .test_support()
+            .role(Role::Label)
             .aria_label("Lines skipped")
             .h(px(LINE_HEIGHT))
             .flex_shrink_0()
@@ -957,8 +964,10 @@ impl LogPane {
                 div()
                     .id(("log-timeline-bar", index))
                     .test_support()
+                    .role(Role::ListBoxOption)
                     .aria_label(label.clone())
                     .aria_selected(is_current)
+                    .when(is_current && focused, |bar| bar.aria_active_descendant())
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -1057,6 +1066,8 @@ impl LogPane {
             .test_support()
             .track_focus(&self.timeline_focus)
             .key_context(LOG_TIMELINE_CONTEXT)
+            .role(Role::ListBox)
+            .aria_orientation(Orientation::Horizontal)
             .aria_label(summary)
             .on_action(cx.listener(|this, _: &TimelinePrevious, _, cx| {
                 this.move_on_timeline(false, cx);
@@ -1276,10 +1287,12 @@ impl Render for LogPane {
         let count = self.render_count(compact, cx);
         let notice = self.render_filter_notice();
         let filtered = self.filter.is_some();
+        let lines_focused = self.lines_focus.is_focused(window);
+        let ring = cx.theme().ring;
         let lines: Vec<AnyElement> = lines
             .unwrap_or_default()
             .into_iter()
-            .map(|row| self.render_row(row, cx))
+            .map(|row| self.render_row(row, lines_focused, cx))
             .collect();
         v_flex()
             .id("logs")
@@ -1299,6 +1312,7 @@ impl Render for LogPane {
                         div()
                             .id("log-summary")
                             .test_support()
+                            .role(Role::Status)
                             .aria_label(summary.clone())
                             .tooltip({
                                 let summary = summary.clone();
@@ -1366,6 +1380,7 @@ impl Render for LogPane {
                             .small()
                             .ghost()
                             .icon(IconName::Download)
+                            .accessibility_label("Export lines")
                             .tooltip("Export lines")
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(ExportLines), cx);
@@ -1402,6 +1417,12 @@ impl Render for LogPane {
                     .child(
                         div()
                             .id("log-lines")
+                            .test_support()
+                            .role(Role::ListBox)
+                            .aria_label("Log lines")
+                            .a11y_synthetic_children(|builder| {
+                                builder.parent_node().set_multiselectable();
+                            })
                             .track_focus(&self.lines_focus)
                             .key_context(LOG_LINES_CONTEXT)
                             .on_action(cx.listener(|this, _: &SelectNextLine, _, cx| {
@@ -1423,6 +1444,10 @@ impl Render for LogPane {
                             .min_h_0()
                             .px_3()
                             .pt_1()
+                            // An edge shows the lines have focus before a line is selected.
+                            .border_t_1()
+                            .border_color(transparent_black())
+                            .focus_visible(|lines| lines.border_color(ring))
                             .flex()
                             .flex_col()
                             .when(following, |lines| lines.justify_end())

@@ -57,6 +57,7 @@ pub fn render_about(cx: &App) -> impl IntoElement + use<> {
             div()
                 .id("about-version")
                 .test_support()
+                .role(Role::Label)
                 .aria_label(version.clone())
                 .text_color(muted)
                 .child(version),
