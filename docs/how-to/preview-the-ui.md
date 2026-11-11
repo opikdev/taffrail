@@ -43,6 +43,8 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 | `owner-links-dark.png`, `owner-links-light.png` | A pod's Summary, linking to its Deployment via its ReplicaSet, with its Node as plain text until Nodes have a view |
 | `owner-link-followed-dark.png`, `owner-link-followed-light.png` | The Deployment after following that link, with **Back** in the panel header |
 | `deployment-details-dark.png`, `deployment-details-light.png` | A stalled Deployment's details |
+| `statefulsets-dark.png`, `statefulsets-light.png` | The StatefulSets table, with an unavailable set, one rolling out, one not ready and one outdated first |
+| `statefulset-details-dark.png`, `statefulset-details-light.png` | An unavailable StatefulSet's details |
 | `no-permission-dark.png`, `no-permission-light.png` | The Deployments view when the API refuses to list Deployments, with the lock in the sidebar |
 | `failed-dark.png` | A cluster that can't be reached |
 | `no-clusters-dark.png` | A kubeconfig with no contexts |

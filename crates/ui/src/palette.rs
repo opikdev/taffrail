@@ -87,7 +87,7 @@ pub struct TailSelector {
 /// Every key the app answers to, for the shortcut sheet.
 pub const SHORTCUTS: [(&str, &str); 23] = [
     (MODIFIER_K, "Open the command palette"),
-    ("1  2", "Go to Pods or Deployments"),
+    ("1  2  3", "Go to Pods, Deployments or StatefulSets"),
     ("/", "Filter the current view"),
     ("f", "Filter log lines"),
     ("j  k", "Move through rows"),

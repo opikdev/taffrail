@@ -6,6 +6,7 @@ cluster="${SIM_CLUSTER:-taffrail}"
 nodes="${SIM_NODES:-100}"
 pods="${SIM_PODS:-5000}"
 deployments="${SIM_DEPLOYMENTS:-500}"
+statefulsets="${SIM_STATEFULSETS:-200}"
 log_rate="${SIM_LOG_RATE:-200}"
 limited_user="${SIM_LIMITED_USER:-jane}"
 limited_namespace="${SIM_LIMITED_NAMESPACE:-team-a}"
@@ -51,6 +52,7 @@ YAML
   kwokctl --name="$cluster" scale node --replicas "$nodes"
   kwokctl --name="$cluster" scale pod --replicas "$pods"
   add_deployments
+  add_statefulsets
 
   docker run -d --name "$generator" --network none \
     -v "$log_dir:$log_dir" -v "$root/scripts:/scripts:ro" python:3.13-alpine \
@@ -123,6 +125,14 @@ YAML
 check_limited() {
   TAFFRAIL_LIMITED_CONTEXT="$limited_context" TAFFRAIL_LIMITED_NAMESPACE="$limited_namespace" \
     cargo test -p taffrail-core --locked limited_user -- --ignored --nocapture
+}
+
+# StatefulSets scaled to zero, so the StatefulSets table has rows without adding pods.
+add_statefulsets() {
+  local i
+  for ((i = 0; i < statefulsets; i++)); do
+    printf -- '---\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: sim-sts-%04d\nspec:\n  replicas: 0\n  serviceName: sim-sts-%04d\n  selector:\n    matchLabels:\n      app: sim-sts-%04d\n  template:\n    metadata:\n      labels:\n        app: sim-sts-%04d\n    spec:\n      containers:\n      - name: app\n        image: busybox\n' "$i" "$i" "$i" "$i"
+  done | k apply -f - >/dev/null
 }
 
 down() {
