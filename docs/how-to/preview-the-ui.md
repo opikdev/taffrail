@@ -10,6 +10,8 @@ TAFFRAIL_PREVIEW_DIR=target/preview cargo run -p taffrail-ui --features preview
 
 The app connects to a fake API server with sample pods and logs, runs through its main states, and writes one image for each.
 
+With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-jane`, it renders that cluster instead. See [Browse as a user with limited permissions](simulate-a-large-cluster.md#browse-as-a-user-with-limited-permissions).
+
 | File | Shows |
 |---|---|
 | `readme-dark.png` | The README screenshot: one namespace, the details panel and a live tail across its pods |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a simulated cluster for benchmarks: scripts/sim-cluster.sh up|down|status|churn
+# Run a simulated cluster for benchmarks: scripts/sim-cluster.sh up|down|status|churn|limited
 set -euo pipefail
 
 cluster="${SIM_CLUSTER:-taffrail}"
@@ -7,10 +7,14 @@ nodes="${SIM_NODES:-100}"
 pods="${SIM_PODS:-5000}"
 deployments="${SIM_DEPLOYMENTS:-500}"
 log_rate="${SIM_LOG_RATE:-200}"
+limited_user="${SIM_LIMITED_USER:-jane}"
+limited_namespace="${SIM_LIMITED_NAMESPACE:-team-a}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 sim="$root/.sim"
 context="kwok-$cluster"
 generator="kwok-$cluster-gen-logs"
+limited_context="$context-$limited_user"
+pki="${KWOK_WORKDIR:-$HOME/.kwok}/clusters/$cluster/pki"
 # Must live inside the Docker VM. Files on the macOS share emit combined
 # fsnotify events that KWOK rejects, which silently breaks `kubectl logs -f`.
 # Each cluster has its own file, so clusters with different names can run together.
@@ -37,7 +41,9 @@ spec:
     follow: true
 YAML
 
-  kwokctl create cluster --name="$cluster" --config="$sim/kwok-$cluster.yaml" --disable-qps-limits
+  # RBAC is on, so a limited user sees what a real cluster would refuse it.
+  kwokctl create cluster --name="$cluster" --config="$sim/kwok-$cluster.yaml" --disable-qps-limits \
+    --kube-authorization
   if [ -n "$previous" ]; then
     kubectl config use-context "$previous" >/dev/null
   fi
@@ -60,7 +66,69 @@ add_deployments() {
   done | k apply -f - >/dev/null
 }
 
+# A user who can read pods and their logs in one namespace, and nothing else. Its context,
+# kwok-<cluster>-<user>, uses a client certificate signed by the cluster's own CA.
+limited() {
+  local key="$sim/$limited_context.key" cert="$sim/$limited_context.crt"
+  mkdir -p "$sim"
+  k create namespace "$limited_namespace" --dry-run=client -o yaml | k apply -f - >/dev/null
+  if ! k -n "$limited_namespace" get deployment team-api >/dev/null 2>&1; then
+    k -n "$limited_namespace" create deployment team-api --image=busybox --replicas=5 >/dev/null
+    k -n "$limited_namespace" rollout status deployment/team-api --timeout=120s >/dev/null
+  fi
+  k apply -f - >/dev/null <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: $limited_namespace
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $limited_user-pod-reader
+  namespace: $limited_namespace
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: $limited_user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-reader
+YAML
+  openssl req -new -newkey rsa:2048 -nodes -keyout "$key" -subj "/CN=$limited_user" \
+    -out "$sim/$limited_context.csr" 2>/dev/null
+  # Extensions make a version 3 certificate, which rustls requires.
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth\n' \
+    > "$sim/$limited_context.ext"
+  openssl x509 -req -in "$sim/$limited_context.csr" -CA "$pki/ca.crt" -CAkey "$pki/ca.key" \
+    -CAcreateserial -days 7 -extfile "$sim/$limited_context.ext" -out "$cert" 2>/dev/null
+  kubectl config set-credentials "$limited_context" --client-certificate="$cert" \
+    --client-key="$key" --embed-certs >/dev/null
+  kubectl config set-context "$limited_context" --cluster="$context" --user="$limited_context" \
+    --namespace="$limited_namespace" >/dev/null
+  echo "Context $limited_context can read pods and logs in $limited_namespace only."
+  kubectl --context="$limited_context" get pods --no-headers | awk '{print $3}' | sort | uniq -c
+}
+
+# Runs the core watches as the limited user, and checks what the API refuses.
+check_limited() {
+  TAFFRAIL_LIMITED_CONTEXT="$limited_context" TAFFRAIL_LIMITED_NAMESPACE="$limited_namespace" \
+    cargo test -p taffrail-core --locked limited_user -- --ignored --nocapture
+}
+
 down() {
+  kubectl config delete-context "$limited_context" >/dev/null 2>&1 || true
+  kubectl config delete-user "$limited_context" >/dev/null 2>&1 || true
+  rm -f "$sim/$limited_context".*
   docker rm -f "$generator" >/dev/null 2>&1 || true
   kwokctl delete cluster --name="$cluster"
   docker run --rm -v "$(dirname "$log_dir"):/sim" python:3.13-alpine rm -rf "/sim/$cluster"
@@ -78,4 +146,7 @@ status() {
   k get pods -A --no-headers | awk '{print $4}' | sort | uniq -c
 }
 
-"${1:-status}"
+case "${1:-status}" in
+  check-limited) check_limited ;;
+  *) "${1:-status}" ;;
+esac

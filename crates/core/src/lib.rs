@@ -7,6 +7,8 @@ mod environment;
 #[cfg(test)]
 mod fake_api;
 mod follow;
+#[cfg(test)]
+mod limited;
 mod links;
 mod logs;
 mod pods;
