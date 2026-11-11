@@ -59,15 +59,17 @@ Every resource view shows the same table, so what follows holds for each of them
 - **StatefulSets** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date and Age. Status reads the replica counts and revisions: **Unavailable** (no pod is ready) is failed; **Rolling out** (pods above the partition don't yet run the update revision), **Scaling**, **Not ready** and **Outdated** (an `OnDelete` set whose pods wait to be deleted to update) are degraded; **Ready** is healthy; **ScaledToZero** is finished.
 - **DaemonSets** show Name, Namespace, Status, Desired, Current, Ready, Up-to-date and Available nodes, Node selector and Age. Status reads the counts of nodes: **Unavailable** (no pod is ready) is failed; **Misscheduled** (its pods run on nodes that shouldn't run them), **Rolling out**, **Outdated** (an `OnDelete` set whose pods wait to be deleted), **Scheduling** (nodes without its pod yet) and **Not ready** are degraded; **Ready** is healthy; **No nodes** (no node should run it) is finished.
 - **Jobs** show Name, Namespace, Status, Completions as succeeded of needed pods, Duration, Age and the CronJob that created it. Status reads the Job's conditions and pod counts: a failed Job shows why, such as **BackoffLimitExceeded** or **DeadlineExceeded**, and is failed; **Retrying** (some pods failed) and **Pending** (no pod is running yet) are degraded; **Running** is healthy; **Complete** and **Suspended** are finished. Duration runs from its start to when it completed or failed, or to now while it runs, to the second while short, such as **2m10s**.
-- **Show its pods**, or `p`, opens the Pods view narrowed to a workload's selector in its namespace. A pill in the panel header names it, such as **deployment/checkout-api**, and its button shows all pods again. **Clear filter** clears it too.
+- **Nodes** show Name, Status, Roles from the node's `node-role.kubernetes.io/*` labels, Version as the kubelet's, Pods as the pods the pod watch lists on the node, and Age. Status reads the node's conditions as `kubectl get nodes` does: **NotReady** and **Unknown** are failed, then **SchedulingDisabled** for a cordoned node and any of **MemoryPressure**, **DiskPressure**, **PIDPressure** and **NetworkUnavailable** follow, such as **Ready, SchedulingDisabled**, which is degraded. **Ready** alone is healthy.
+- Nodes are cluster-wide, so the panel header shows **Cluster-wide** in place of the namespace picker, and the chosen namespace stays as it was for the other views. Only workload views show **Tail its pods**.
+- **Show its pods**, or `p`, opens the Pods view narrowed to a workload's selector in its namespace, or to a node's pods in every namespace. A pill in the panel header names it, such as **deployment/checkout-api** or **node/node-07**, and its button shows all pods again. **Clear filter** clears it too.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
 ## Details panel
 
 | Tab | Shows |
 |---|---|
-| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels. For a StatefulSet: replicas, Service, strategy, pod order, revision (current → update while they differ), selector, the same actions, conditions, images, volume claims and labels. For a DaemonSet: node counts, strategy, selector, the same actions, conditions, images, node selector, tolerations and labels. For a Job: completions, active, ready and failed pods with its backoff limit, duration, start, the CronJob that created it as a link, parallelism, completion mode, deadline, how long it is kept after it finishes, selector, the same actions, conditions, images and labels |
-| Events | Recent events for this object, newest first |
+| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels. For a StatefulSet: replicas, Service, strategy, pod order, revision (current → update while they differ), selector, the same actions, conditions, images, volume claims and labels. For a DaemonSet: node counts, strategy, selector, the same actions, conditions, images, node selector, tolerations and labels. For a Job: completions, active, ready and failed pods with its backoff limit, duration, start, the CronJob that created it as a link, parallelism, completion mode, deadline, how long it is kept after it finishes, selector, the same actions, conditions, images and labels. For a node: status, roles, kubelet, OS image, platform, kernel and runtime, **Show its pods**, addresses, capacity and what pods may use, taints, conditions and labels |
+| Events | Recent events for this object, newest first. A cluster-scoped object's events are read from every namespace, because they are recorded in another, usually `default` |
 | YAML | Read-only YAML with coloured keys and **Copy YAML**, without `managedFields` |
 
 - The panel reads the object when it opens, when its row changes, and every 10 seconds.
@@ -147,15 +149,15 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `⌘N` / `Ctrl+N` | Open a new window |
 | `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
-| `1` – `5` | Go to Pods, Deployments, StatefulSets, DaemonSets or Jobs. Each view keeps its own digit, in sidebar order: `6` Nodes, `7` Namespaces and `8` Events as they arrive |
+| `1` – `6` | Go to Pods, Deployments, StatefulSets, DaemonSets, Jobs or Nodes. Each view keeps its own digit, in sidebar order: `7` Namespaces and `8` Events as they arrive |
 | `/` | Filter the current view |
 | `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |
 | `Enter` | Open details |
 | `l` | Tail logs for the selection |
 | `w` | Tail the selected pod's workload, or the selected workload's pods |
-| `p` | Show the selected workload's pods |
-| `⌘[` / `Alt+←` | Go back after following a link or **Show its pods** |
+| `p` | Show the selected workload's or node's pods |
+| `⌘[ / `Alt+←` | Go back after following a link or **Show its pods** |
 | `Tab` / `Shift+Tab` | Move to the next or previous control, out of the table and into the details panel's links |
 | `s` | Show the summary |
 | `y` | Show YAML |
@@ -187,7 +189,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | Can't connect | **Can't reach staging**, with the error and **Try again**. |
 | Login needed | **Waiting for login to staging.** Finish signing in in your browser or terminal. |
 | Connection lost | **Reconnecting to staging.** Tables show their last data, marked with the time it was last updated. |
-| No permission | **You can't list Deployments in payments**, with the API's reason. Across all namespaces it reads **You can't list Deployments across all namespaces**, asks you to choose a namespace you can read, and offers **Show namespace default** for the context's namespace. Only that view is affected, and the rest of the app keeps working. |
+| No permission | **You can't list Deployments in payments**, with the API's reason. Across all namespaces it reads **You can't list Deployments across all namespaces**, asks you to choose a namespace you can read, and offers **Show namespace default** for the context's namespace. For a kind outside namespaces it reads **You can't list Nodes in this cluster**, and says that listing them needs a cluster-wide role. Only that view is affected, and the rest of the app keeps working. |
 | Kind not served | **This cluster doesn't serve Deployments**, with the API's reason. |
 | No rows | **No pods in `payments`.** Offer **Show all namespaces**. Each view names its own kind, such as **No deployments in `payments`**. |
 | No matches | **No pods match "web"**, or **No pods match deployment/checkout-api** for a workload's pods. Offer **Clear filter**. |

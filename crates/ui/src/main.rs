@@ -8,6 +8,7 @@ mod details;
 mod fake_api;
 mod jobs;
 mod logs;
+mod nodes;
 mod palette;
 mod pods;
 #[cfg(feature = "preview")]

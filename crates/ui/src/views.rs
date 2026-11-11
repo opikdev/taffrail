@@ -11,13 +11,13 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, JobRow, ObjectKey,
+    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, JobRow, NodeRow, ObjectKey,
     ResourceWatch, StatefulSetRow, WatchError,
 };
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
 use crate::root::{Notice, Root, no_rows_notice};
-use crate::table::{ResourceTable, SelectorFilter, column_names, show_in_place};
+use crate::table::{PodCounts, ResourceTable, SelectorFilter, column_names, show_in_place};
 
 /// A resource view, in sidebar order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,15 +27,17 @@ pub enum View {
     StatefulSets,
     DaemonSets,
     Jobs,
+    Nodes,
 }
 
 impl View {
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 6] = [
         View::Pods,
         View::Deployments,
         View::StatefulSets,
         View::DaemonSets,
         View::Jobs,
+        View::Nodes,
     ];
 
     /// The sidebar label, which also names the view in saved state.
@@ -46,6 +48,7 @@ impl View {
             View::StatefulSets => "StatefulSets",
             View::DaemonSets => "DaemonSets",
             View::Jobs => "Jobs",
+            View::Nodes => "Nodes",
         }
     }
 
@@ -55,6 +58,7 @@ impl View {
             View::Pods | View::Deployments | View::StatefulSets | View::DaemonSets | View::Jobs => {
                 "Workloads"
             }
+            View::Nodes => "Cluster",
         }
     }
 
@@ -68,6 +72,7 @@ impl View {
             View::StatefulSets => "3",
             View::DaemonSets => "4",
             View::Jobs => "5",
+            View::Nodes => "6",
         }
     }
 
@@ -78,6 +83,7 @@ impl View {
             View::StatefulSets => IconName::Database,
             View::DaemonSets => IconName::Boxes,
             View::Jobs => IconName::Play,
+            View::Nodes => IconName::Server,
         }
     }
 
@@ -131,6 +137,7 @@ pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box
         View::StatefulSets => Box::new(ResourcePanel::<StatefulSetRow>::new(view, window, cx)),
         View::DaemonSets => Box::new(ResourcePanel::<DaemonSetRow>::new(view, window, cx)),
         View::Jobs => Box::new(ResourcePanel::<JobRow>::new(view, window, cx)),
+        View::Nodes => Box::new(ResourcePanel::<NodeRow>::new(view, window, cx)),
     }
 }
 
@@ -146,6 +153,8 @@ pub struct PanelStatus {
 /// A view's table, watch and details panel, without its kind of object.
 pub trait Panel {
     fn view(&self) -> View;
+    /// Whether its objects live in namespaces, so that the namespace picker applies.
+    fn namespaced(&self) -> bool;
     fn status(&self, cx: &App) -> PanelStatus;
     /// What to say when no rows show, though the watch has listed.
     fn empty_notice(&self, cx: &App) -> Notice;
@@ -174,8 +183,16 @@ pub trait Panel {
     fn has_selection(&self, cx: &App) -> bool;
     /// The pods a tail of the selected object follows, for a workload.
     fn selected_follow(&self, cx: &App) -> Option<Follow>;
+    /// The pods **Show its pods** shows for the selected object, and their namespace.
+    fn selected_pods(&self, cx: &App) -> Option<(SelectorFilter, Option<String>)>;
+    /// Whether a column counts pods, so the panel wants [`PodCounts`].
+    fn counts_pods(&self) -> bool;
+    fn set_pod_counts(&self, counts: Arc<PodCounts>, cx: &mut App);
     #[cfg(feature = "bench")]
     fn scroll_to_row(&self, row: usize, cx: &mut App);
+    /// The text of each shown cell in a row, as a screen reader reads it.
+    #[cfg(test)]
+    fn row_cells(&self, row: usize, cx: &App) -> Vec<String>;
 
     /// Starts watching, unless a watch is running.
     fn start(
@@ -265,6 +282,10 @@ impl<R: Inspect> ResourcePanel<R> {
 impl<R: Inspect> Panel for ResourcePanel<R> {
     fn view(&self) -> View {
         self.view
+    }
+
+    fn namespaced(&self) -> bool {
+        R::NAMESPACED
     }
 
     fn status(&self, cx: &App) -> PanelStatus {
@@ -380,6 +401,32 @@ impl<R: Inspect> Panel for ResourcePanel<R> {
             .delegate()
             .selected_object()
             .and_then(|row| row.follow())
+    }
+
+    fn selected_pods(&self, cx: &App) -> Option<(SelectorFilter, Option<String>)> {
+        self.table
+            .read(cx)
+            .delegate()
+            .selected_object()
+            .and_then(|row| row.pods())
+    }
+
+    fn counts_pods(&self) -> bool {
+        ResourceTable::<R>::counts_pods()
+    }
+
+    fn set_pod_counts(&self, counts: Arc<PodCounts>, cx: &mut App) {
+        self.update_table(cx, |table| table.set_pod_counts(counts));
+    }
+
+    #[cfg(test)]
+    fn row_cells(&self, row: usize, cx: &App) -> Vec<String> {
+        use gpui_kit::component::table::TableDelegate;
+        let table = self.table.read(cx).delegate();
+        (0..table.columns_count(cx))
+            .filter_map(|position| table.cell_label(row, position, cx))
+            .map(|cell| cell.to_string())
+            .collect()
     }
 
     #[cfg(feature = "bench")]

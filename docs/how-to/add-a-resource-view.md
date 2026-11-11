@@ -20,7 +20,7 @@ Add `crates/core/src/<kind>.rs` and export it from `lib.rs`.
 
 Add `crates/ui/src/<kind>.rs` and declare it in `main.rs`.
 
-- `impl TableRow for <Row>`: `SINGULAR` and `PLURAL` for notices, `COLUMNS`, and `tone`, which colours the status and sets the default problems-first order. Each `ColumnDef` gives a name, a width, a `CellStyle`, the cell text and the ascending order. The first column is the name, which always shows. Override `follow` for a workload, so **Tail its pods** and **Show its pods** work, and `labels` if a selector should narrow the kind.
+- `impl TableRow for <Row>`: `SINGULAR` and `PLURAL` for notices, `COLUMNS`, and `tone`, which colours the status and sets the default problems-first order. Each `ColumnDef` gives a name, a width, a `CellStyle`, the cell text and the ascending order. The first column is the name, which always shows. Override `follow` for a workload, so **Tail its pods** and **Show its pods** work, and `labels` if a selector should narrow the kind. A kind whose pods are not chosen by a selector, such as Nodes, overrides `pods` with a `RowMatch::Field` instead, and the pod row answers that field in `field`. For a **Pods** column counted from the pod watch, use `CellStyle::PodCount` and override `pod_count`.
 - `impl Inspect for <Row>`: the Details type and the Summary tab. Reuse `field` and `section_title` from `details.rs`. Name related objects with `object_link` and an `ObjectLink`, such as a StatefulSet's pods' Node, so they open in their view. If the details need a second read to name one, as a pod's ReplicaSet does to find its Deployment, override `ObjectDetails::resolve` in core.
 
 ## 3. Register the view
