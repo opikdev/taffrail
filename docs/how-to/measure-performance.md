@@ -100,4 +100,4 @@ scripts/sample-process-tree.py <pid> [<pid> ...] --seconds 20
 | `TAFFRAIL_BENCH_SECONDS` | `30` | How long to scroll |
 | `TAFFRAIL_BENCH_TAIL` | `1` | Set to `0` to skip the log tail |
 | `TAFFRAIL_BENCH_FOLLOW` | Empty | A label selector to follow instead of tailing the first 50 pods |
-| `TAFFRAIL_BENCH_VIEW` | Empty | A view to scroll instead of Pods, such as `Deployments` |
+| `TAFFRAIL_BENCH_VIEW` | Empty | A view to scroll instead of Pods, such as `Deployments`. Given to `scripts/bench.sh`, it runs that view alone |

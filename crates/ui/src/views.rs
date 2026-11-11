@@ -11,8 +11,8 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, JobRow, NamespaceRow, NodeRow,
-    ObjectKey, ResourceWatch, StatefulSetRow, WatchError,
+    Backend, Connection, CoreEventRow, DaemonSetRow, DeploymentRow, EventRow, Feed, Follow, JobRow,
+    NamespaceRow, NodeRow, ObjectKey, ResourceWatch, StatefulSetRow, WatchError,
 };
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
@@ -29,10 +29,11 @@ pub enum View {
     Jobs,
     Nodes,
     Namespaces,
+    Events,
 }
 
 impl View {
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::Pods,
         View::Deployments,
         View::StatefulSets,
@@ -40,6 +41,7 @@ impl View {
         View::Jobs,
         View::Nodes,
         View::Namespaces,
+        View::Events,
     ];
 
     /// The sidebar label, which also names the view in saved state.
@@ -52,6 +54,7 @@ impl View {
             View::Jobs => "Jobs",
             View::Nodes => "Nodes",
             View::Namespaces => "Namespaces",
+            View::Events => "Events",
         }
     }
 
@@ -61,7 +64,7 @@ impl View {
             View::Pods | View::Deployments | View::StatefulSets | View::DaemonSets | View::Jobs => {
                 "Workloads"
             }
-            View::Nodes | View::Namespaces => "Cluster",
+            View::Nodes | View::Namespaces | View::Events => "Cluster",
         }
     }
 
@@ -77,6 +80,7 @@ impl View {
             View::Jobs => "5",
             View::Nodes => "6",
             View::Namespaces => "7",
+            View::Events => "8",
         }
     }
 
@@ -89,6 +93,7 @@ impl View {
             View::Jobs => IconName::Play,
             View::Nodes => IconName::Server,
             View::Namespaces => IconName::Folder,
+            View::Events => IconName::Activity,
         }
     }
 
@@ -144,7 +149,14 @@ pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box
         View::Jobs => Box::new(ResourcePanel::<JobRow>::new(view, window, cx)),
         View::Nodes => Box::new(ResourcePanel::<NodeRow>::new(view, window, cx)),
         View::Namespaces => Box::new(ResourcePanel::<NamespaceRow>::new(view, window, cx)),
+        View::Events => Box::new(ResourcePanel::<EventRow>::new(view, window, cx)),
     }
+}
+
+/// The Events panel over the core `v1` API, for a cluster that does not serve
+/// `events.k8s.io/v1`.
+pub fn new_core_events_panel(window: &mut Window, cx: &mut Context<Root>) -> Box<dyn Panel> {
+    Box::new(ResourcePanel::<CoreEventRow>::new(View::Events, window, cx))
 }
 
 /// What the root needs to know about a view's rows to choose what to show.

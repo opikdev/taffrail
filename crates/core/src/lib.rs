@@ -5,6 +5,7 @@ mod daemonsets;
 mod deployments;
 mod details;
 mod environment;
+mod events;
 #[cfg(test)]
 mod fake_api;
 mod follow;
@@ -28,6 +29,7 @@ pub use daemonsets::{DaemonSetDetails, DaemonSetRow};
 pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
 pub use details::{ContainerDetails, ObjectDetails, ObjectEvent, PodDetails};
 pub use environment::use_login_shell_environment;
+pub use events::{CoreEventDetails, CoreEventRow, EventDetails, EventRow};
 pub use follow::Follow;
 pub use jobs::{JobDetails, JobRow};
 pub use links::ObjectLink;

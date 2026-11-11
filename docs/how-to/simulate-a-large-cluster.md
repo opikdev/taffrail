@@ -75,6 +75,7 @@ Both refuse any context that does not start with `kwok-`, and read only that con
 | `SIM_STATEFULSETS` | `200` | StatefulSets scaled to zero, which fill the StatefulSets table without adding pods |
 | `SIM_DAEMONSETS` | `50` | DaemonSets whose node selector matches no node, which fill the DaemonSets table without adding pods |
 | `SIM_JOBS` | `200` | Suspended Jobs, which fill the Jobs table without adding pods |
+| `SIM_EVENTS` | `5000` | Events about the simulated pods, a third of them warnings, added to those the control plane records. The API server expires them after an hour |
 | `SIM_LOG_RATE` | `200` | Lines per second in the shared log file |
 | `SIM_CHURN_PODS` | `500` | Pods in the churn Deployment |
 | `SIM_LIMITED_USER` | `jane` | The user `limited` creates; the context is `kwok-<name>-<user>` |
