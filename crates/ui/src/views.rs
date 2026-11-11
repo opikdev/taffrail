@@ -11,8 +11,8 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, Connection, DeploymentRow, Feed, Follow, ObjectKey, ResourceWatch, StatefulSetRow,
-    WatchError,
+    Backend, Connection, DaemonSetRow, DeploymentRow, Feed, Follow, ObjectKey, ResourceWatch,
+    StatefulSetRow, WatchError,
 };
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
@@ -25,10 +25,16 @@ pub enum View {
     Pods,
     Deployments,
     StatefulSets,
+    DaemonSets,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Pods, View::Deployments, View::StatefulSets];
+    pub const ALL: [View; 4] = [
+        View::Pods,
+        View::Deployments,
+        View::StatefulSets,
+        View::DaemonSets,
+    ];
 
     /// The sidebar label, which also names the view in saved state.
     pub fn name(self) -> &'static str {
@@ -36,13 +42,14 @@ impl View {
             View::Pods => "Pods",
             View::Deployments => "Deployments",
             View::StatefulSets => "StatefulSets",
+            View::DaemonSets => "DaemonSets",
         }
     }
 
     /// The sidebar group, which the panel header names before the view.
     pub fn group(self) -> &'static str {
         match self {
-            View::Pods | View::Deployments | View::StatefulSets => "Workloads",
+            View::Pods | View::Deployments | View::StatefulSets | View::DaemonSets => "Workloads",
         }
     }
 
@@ -54,6 +61,7 @@ impl View {
             View::Pods => "1",
             View::Deployments => "2",
             View::StatefulSets => "3",
+            View::DaemonSets => "4",
         }
     }
 
@@ -62,6 +70,7 @@ impl View {
             View::Pods => IconName::Box,
             View::Deployments => IconName::Layers,
             View::StatefulSets => IconName::Database,
+            View::DaemonSets => IconName::Boxes,
         }
     }
 
@@ -113,6 +122,7 @@ pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box
         )),
         View::Deployments => Box::new(ResourcePanel::<DeploymentRow>::new(view, window, cx)),
         View::StatefulSets => Box::new(ResourcePanel::<StatefulSetRow>::new(view, window, cx)),
+        View::DaemonSets => Box::new(ResourcePanel::<DaemonSetRow>::new(view, window, cx)),
     }
 }
 

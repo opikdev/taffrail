@@ -1,6 +1,7 @@
 mod about;
 #[cfg(feature = "bench")]
 mod bench;
+mod daemonsets;
 mod deployments;
 mod details;
 #[cfg(any(test, feature = "preview"))]

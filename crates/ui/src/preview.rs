@@ -375,6 +375,63 @@ fn stateful_set_objects(created: &str) -> Vec<(String, String)> {
     kind_objects("apps/v1", "statefulsets", "StatefulSetList", &items)
 }
 
+/// DaemonSets as `(namespace, name, [desired, current, ready, updated, misscheduled],
+/// node selector)`, with one that runs on nodes it shouldn't, one with no ready pod, one
+/// rolling out and one no node should run.
+const DAEMON_SETS: [(&str, &str, [u32; 5], &str); 7] = [
+    (
+        "kube-system",
+        "kube-proxy",
+        [12, 12, 12, 12, 0],
+        "kubernetes.io/os=linux",
+    ),
+    (
+        "kube-system",
+        "csi-node-driver",
+        [12, 12, 0, 12, 0],
+        "kubernetes.io/os=linux",
+    ),
+    (
+        "observability",
+        "node-exporter",
+        [12, 13, 13, 13, 1],
+        "kubernetes.io/os=linux",
+    ),
+    ("observability", "log-shipper", [12, 12, 12, 7, 0], ""),
+    ("networking", "cni-agent", [12, 12, 12, 12, 0], ""),
+    (
+        "gpu",
+        "nvidia-device-plugin",
+        [3, 3, 3, 3, 0],
+        "accelerator=nvidia",
+    ),
+    (
+        "windows",
+        "win-exporter",
+        [0, 0, 0, 0, 0],
+        "kubernetes.io/os=windows",
+    ),
+];
+
+fn daemon_set_objects(created: &str) -> Vec<(String, String)> {
+    let items: Vec<_> = DAEMON_SETS
+        .iter()
+        .map(|&(namespace, name, counts, nodes)| {
+            let [desired, current, ready, updated, misscheduled] = counts;
+            let node_selector = match nodes.split_once('=') {
+                Some((key, value)) => format!(r#""nodeSelector":{{"{key}":"{value}"}},"#),
+                None => String::new(),
+            };
+            let body = format!(
+                r#"{{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{{"namespace":"{namespace}","name":"{name}","uid":"ds-{name}","resourceVersion":"1","generation":2,"creationTimestamp":"{created}","labels":{{"app":"{name}"}},"managedFields":[{{"manager":"kubectl"}}]}},"spec":{{"selector":{{"matchLabels":{{"app":"{name}"}}}},"updateStrategy":{{"type":"RollingUpdate","rollingUpdate":{{"maxSurge":0,"maxUnavailable":1}}}},"template":{{"metadata":{{"labels":{{"app":"{name}"}}}},"spec":{{{node_selector}"tolerations":[{{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}},{{"operator":"Exists","effect":"NoExecute"}}],"containers":[{{"name":"{name}","image":"registry.example.com/{name}:1.9.4"}}]}}}}}},"status":{{"observedGeneration":2,"desiredNumberScheduled":{desired},"currentNumberScheduled":{current},"numberReady":{ready},"updatedNumberScheduled":{updated},"numberAvailable":{ready},"numberUnavailable":{unavailable},"numberMisscheduled":{misscheduled}}}}}"#,
+                unavailable = desired.saturating_sub(ready),
+            );
+            (namespace, name, body)
+        })
+        .collect();
+    kind_objects("apps/v1", "daemonsets", "DaemonSetList", &items)
+}
+
 fn pod_body(created: &str) -> String {
     format!(
         r#"{{"kind":"Pod","apiVersion":"v1","metadata":{{"namespace":"payments","name":"checkout-api-7f9c6d-h7vcd","uid":"3f1c9a7e-52ab-4b7e-9f55-0a0f6d1f1a11","resourceVersion":"188274","creationTimestamp":"{created}","labels":{{"app":"checkout-api","pod-template-hash":"7f9c6d","tier":"backend"}},"ownerReferences":[{{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"checkout-api-7f9c6d","uid":"9","controller":true}}],"managedFields":[{{"manager":"kube-controller-manager"}}]}},"spec":{{"nodeName":"node-07","restartPolicy":"Always","serviceAccountName":"checkout-api","containers":[{{"name":"app","image":"registry.example.com/checkout-api:2.31.0","ports":[{{"containerPort":8080,"protocol":"TCP"}}],"env":[{{"name":"POSTGRES_URL","value":"postgres://10.4.12.8:5432/checkout"}}],"resources":{{"limits":{{"memory":"512Mi"}},"requests":{{"cpu":"250m","memory":"256Mi"}}}}}},{{"name":"proxy","image":"registry.example.com/envoy:1.30.2"}}]}},"status":{{"phase":"Running","podIP":"10.4.3.21","hostIP":"10.0.7.4","containerStatuses":[{{"name":"app","image":"checkout-api:2.31.0","imageID":"x","ready":false,"restartCount":7,"state":{{"waiting":{{"reason":"CrashLoopBackOff"}}}},"lastState":{{"terminated":{{"exitCode":1,"reason":"Error"}}}}}},{{"name":"proxy","image":"envoy:1.30.2","imageID":"x","ready":true,"restartCount":0,"state":{{"running":{{"startedAt":"{created}"}}}}}}]}}}}"#
@@ -1181,6 +1238,15 @@ pub fn run(directory: PathBuf) {
         View::StatefulSets,
         "kafka",
         ("statefulsets", "statefulset-details"),
+    );
+
+    workload_scenes(
+        &directory,
+        created,
+        daemon_set_objects(created),
+        View::DaemonSets,
+        "kube-proxy",
+        ("daemonsets", "daemonset-details"),
     );
 
     let mut empty = connected(&server, ThemeMode::Light);

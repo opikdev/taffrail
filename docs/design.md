@@ -57,6 +57,7 @@ Every resource view shows the same table, so what follows holds for each of them
 - Status shows a dot and a word in a colour, never colour alone.
 - **Deployments** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date, Available and Age. Status reads the Deployment's conditions and replica counts: **Stalled** (its rollout passed its progress deadline), **ReplicaFailure** and **Unavailable** are failed; **Progressing** is degraded; **Available** is healthy; **Paused** and **ScaledToZero** are finished.
 - **StatefulSets** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date and Age. Status reads the replica counts and revisions: **Unavailable** (no pod is ready) is failed; **Rolling out** (pods above the partition don't yet run the update revision), **Scaling**, **Not ready** and **Outdated** (an `OnDelete` set whose pods wait to be deleted to update) are degraded; **Ready** is healthy; **ScaledToZero** is finished.
+- **DaemonSets** show Name, Namespace, Status, Desired, Current, Ready, Up-to-date and Available nodes, Node selector and Age. Status reads the counts of nodes: **Unavailable** (no pod is ready) is failed; **Misscheduled** (its pods run on nodes that shouldn't run them), **Rolling out**, **Outdated** (an `OnDelete` set whose pods wait to be deleted), **Scheduling** (nodes without its pod yet) and **Not ready** are degraded; **Ready** is healthy; **No nodes** (no node should run it) is finished.
 - **Show its pods**, or `p`, opens the Pods view narrowed to a workload's selector in its namespace. A pill in the panel header names it, such as **deployment/checkout-api**, and its button shows all pods again. **Clear filter** clears it too.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
@@ -64,7 +65,7 @@ Every resource view shows the same table, so what follows holds for each of them
 
 | Tab | Shows |
 |---|---|
-| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels. For a StatefulSet: replicas, Service, strategy, pod order, revision (current → update while they differ), selector, the same actions, conditions, images, volume claims and labels |
+| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels. For a StatefulSet: replicas, Service, strategy, pod order, revision (current → update while they differ), selector, the same actions, conditions, images, volume claims and labels. For a DaemonSet: node counts, strategy, selector, the same actions, conditions, images, node selector, tolerations and labels |
 | Events | Recent events for this object, newest first |
 | YAML | Read-only YAML with coloured keys and **Copy YAML**, without `managedFields` |
 
@@ -145,7 +146,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `⌘N` / `Ctrl+N` | Open a new window |
 | `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
-| `1` `2` `3` | Go to Pods, Deployments or StatefulSets. Each view keeps its own digit, in sidebar order: `4` DaemonSets, `5` Jobs, `6` Nodes, `7` Namespaces and `8` Events as they arrive |
+| `1` – `4` | Go to Pods, Deployments, StatefulSets or DaemonSets. Each view keeps its own digit, in sidebar order: `5` Jobs, `6` Nodes, `7` Namespaces and `8` Events as they arrive |
 | `/` | Filter the current view |
 | `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |

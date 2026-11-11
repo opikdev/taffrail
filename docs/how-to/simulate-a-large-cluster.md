@@ -73,6 +73,7 @@ Both refuse any context that does not start with `kwok-`, and read only that con
 | `SIM_PODS` | `5000` | Fake pods |
 | `SIM_DEPLOYMENTS` | `500` | Deployments scaled to zero, which fill the Deployments table without adding pods |
 | `SIM_STATEFULSETS` | `200` | StatefulSets scaled to zero, which fill the StatefulSets table without adding pods |
+| `SIM_DAEMONSETS` | `50` | DaemonSets whose node selector matches no node, which fill the DaemonSets table without adding pods |
 | `SIM_LOG_RATE` | `200` | Lines per second in the shared log file |
 | `SIM_CHURN_PODS` | `500` | Pods in the churn Deployment |
 | `SIM_LIMITED_USER` | `jane` | The user `limited` creates; the context is `kwok-<name>-<user>` |

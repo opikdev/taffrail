@@ -7,6 +7,7 @@ nodes="${SIM_NODES:-100}"
 pods="${SIM_PODS:-5000}"
 deployments="${SIM_DEPLOYMENTS:-500}"
 statefulsets="${SIM_STATEFULSETS:-200}"
+daemonsets="${SIM_DAEMONSETS:-50}"
 log_rate="${SIM_LOG_RATE:-200}"
 limited_user="${SIM_LIMITED_USER:-jane}"
 limited_namespace="${SIM_LIMITED_NAMESPACE:-team-a}"
@@ -53,6 +54,7 @@ YAML
   kwokctl --name="$cluster" scale pod --replicas "$pods"
   add_deployments
   add_statefulsets
+  add_daemonsets
 
   docker run -d --name "$generator" --network none \
     -v "$log_dir:$log_dir" -v "$root/scripts:/scripts:ro" python:3.13-alpine \
@@ -132,6 +134,15 @@ add_statefulsets() {
   local i
   for ((i = 0; i < statefulsets; i++)); do
     printf -- '---\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: sim-sts-%04d\nspec:\n  replicas: 0\n  serviceName: sim-sts-%04d\n  selector:\n    matchLabels:\n      app: sim-sts-%04d\n  template:\n    metadata:\n      labels:\n        app: sim-sts-%04d\n    spec:\n      containers:\n      - name: app\n        image: busybox\n' "$i" "$i" "$i" "$i"
+  done | k apply -f - >/dev/null
+}
+
+# DaemonSets whose node selector matches no node, so the DaemonSets table has rows
+# without adding pods.
+add_daemonsets() {
+  local i
+  for ((i = 0; i < daemonsets; i++)); do
+    printf -- '---\napiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: sim-ds-%04d\nspec:\n  selector:\n    matchLabels:\n      app: sim-ds-%04d\n  template:\n    metadata:\n      labels:\n        app: sim-ds-%04d\n    spec:\n      nodeSelector:\n        taffrail.dev/sim-daemonset: "%04d"\n      containers:\n      - name: app\n        image: busybox\n' "$i" "$i" "$i" "$i"
   done | k apply -f - >/dev/null
 }
 
