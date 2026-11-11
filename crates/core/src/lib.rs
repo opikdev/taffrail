@@ -15,7 +15,9 @@ mod pods;
 mod reason;
 mod selector;
 mod state;
+mod statefulsets;
 mod watch;
+mod workload;
 
 pub use cluster::{Backend, ClusterError, Connection, Contexts};
 pub use deployments::{Condition, DeploymentDetails, DeploymentRow};
@@ -32,6 +34,7 @@ pub use logs::{
 pub use pods::{Owner, PodFeed, PodKey, PodRow, PodSnapshot, PodWatch, log_targets};
 pub use selector::Selector;
 pub use state::{SavedState, WindowRect, state_path};
+pub use statefulsets::{ClaimTemplate, StatefulSetDetails, StatefulSetRow};
 pub use watch::{Feed, ObjectKey, ResourceWatch, Row, Snapshot, WatchError};
 
 pub const APP_NAME: &str = "Taffrail";

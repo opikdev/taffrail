@@ -1,15 +1,13 @@
-use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use taffrail_core::{Condition, DeploymentDetails, DeploymentRow, Follow};
 
-use crate::details::{Inspect, field, section_title};
-use crate::palette::{ShowPods, TailWorkload};
+use crate::details::{Inspect, field};
 use crate::table::{
     CellStyle, ColumnDef, TableRow, Tone, age_text, by_age, format_age, unix_now, urgency,
 };
+use crate::workload::{conditions_section, labels_section, mono_text, pairs_section, pod_actions};
 
 pub fn deployment_tone(status: &str) -> Tone {
     match status {
@@ -105,49 +103,10 @@ fn condition_tone(condition: &Condition) -> Tone {
     }
 }
 
-fn render_condition(condition: &Condition, cx: &App) -> impl IntoElement + use<> {
-    let muted = cx.theme().muted_foreground;
-    let color = condition_tone(condition).color(cx);
-    v_flex()
-        .gap_0p5()
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_sm()
-                .child(div().flex_1().min_w_0().child(condition.kind.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color)
-                        .child(condition.status.clone()),
-                ),
-        )
-        .when(!condition.reason.is_empty(), |card| {
-            card.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(condition.reason.clone()),
-            )
-        })
-        .when(!condition.message.is_empty(), |card| {
-            card.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(condition.message.clone()),
-            )
-        })
-}
-
 impl Inspect for DeploymentRow {
     type Details = DeploymentDetails;
 
     fn summary(&self, details: Option<&DeploymentDetails>, cx: &App) -> AnyElement {
-        let theme = cx.theme();
-        let mono = theme.mono_font_family.clone();
-        let muted = theme.muted_foreground;
         let mut fields = v_flex().gap_1p5();
         fields = fields.child(field(
             "Status",
@@ -184,87 +143,20 @@ impl Inspect for DeploymentRow {
                 .child(field("Strategy", div().child(details.strategy.clone()), cx))
                 .child(field(
                     "Selector",
-                    div()
-                        .font_family(mono.clone())
-                        .text_xs()
-                        .child(details.selector.clone()),
+                    mono_text(details.selector.clone(), cx),
                     cx,
                 ));
         }
-        let actions = h_flex()
-            .gap_2()
-            .child(
-                Button::new("tail-its-pods")
-                    .small()
-                    .outline()
-                    .icon(Icon::new(IconName::ScrollText))
-                    .label("Tail its pods")
-                    .disabled(self.selector.is_none())
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(TailWorkload), cx)),
-            )
-            .child(
-                Button::new("show-its-pods")
-                    .small()
-                    .outline()
-                    .icon(Icon::new(IconName::Box))
-                    .label("Show its pods")
-                    .disabled(self.selector.is_none())
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowPods), cx)),
-            );
         let conditions = details.map_or(&[][..], |details| &details.conditions);
         let images = details.map_or(&[][..], |details| &details.images);
         let labels = details.map_or(&[][..], |details| &details.labels);
         v_flex()
             .gap_4()
             .child(fields)
-            .child(actions)
-            .when(!conditions.is_empty(), |summary| {
-                summary.child(
-                    v_flex()
-                        .gap_2()
-                        .child(section_title("Conditions", cx))
-                        .children(
-                            conditions
-                                .iter()
-                                .map(|condition| render_condition(condition, cx)),
-                        ),
-                )
-            })
-            .when(!images.is_empty(), |summary| {
-                summary.child(
-                    v_flex()
-                        .gap_1()
-                        .child(section_title("Images", cx))
-                        .children(images.iter().map(|(container, image)| {
-                            h_flex()
-                                .gap_2()
-                                .text_xs()
-                                .child(div().flex_shrink_0().child(container.clone()))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_family(mono.clone())
-                                        .text_color(muted)
-                                        .child(image.clone()),
-                                )
-                        })),
-                )
-            })
-            .when(!labels.is_empty(), |summary| {
-                summary.child(
-                    v_flex()
-                        .gap_1()
-                        .child(section_title("Labels", cx))
-                        .children(labels.iter().map(|(key, value)| {
-                            div()
-                                .text_xs()
-                                .font_family(mono.clone())
-                                .text_color(muted)
-                                .child(format!("{key}={value}"))
-                        })),
-                )
-            })
+            .child(pod_actions(self.selector.is_some()))
+            .children(conditions_section(conditions, condition_tone, cx))
+            .children(pairs_section("Images", images.iter().cloned(), cx))
+            .children(labels_section(labels, cx))
             .into_any_element()
     }
 }

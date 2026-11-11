@@ -56,6 +56,7 @@ Every resource view shows the same table, so what follows holds for each of them
 - **Tail first 50 pods** follows the rows as shown, so sorting decides which pods are tailed.
 - Status shows a dot and a word in a colour, never colour alone.
 - **Deployments** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date, Available and Age. Status reads the Deployment's conditions and replica counts: **Stalled** (its rollout passed its progress deadline), **ReplicaFailure** and **Unavailable** are failed; **Progressing** is degraded; **Available** is healthy; **Paused** and **ScaledToZero** are finished.
+- **StatefulSets** show Name, Namespace, Status, Ready as ready of desired replicas, Up-to-date and Age. Status reads the replica counts and revisions: **Unavailable** (no pod is ready) is failed; **Rolling out** (pods above the partition don't yet run the update revision), **Scaling**, **Not ready** and **Outdated** (an `OnDelete` set whose pods wait to be deleted to update) are degraded; **Ready** is healthy; **ScaledToZero** is finished.
 - **Show its pods**, or `p`, opens the Pods view narrowed to a workload's selector in its namespace. A pill in the panel header names it, such as **deployment/checkout-api**, and its button shows all pods again. **Clear filter** clears it too.
 - Numbers are right-aligned with tabular figures. Long names truncate in the middle, with the full name on hover.
 
@@ -63,7 +64,7 @@ Every resource view shows the same table, so what follows holds for each of them
 
 | Tab | Shows |
 |---|---|
-| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels |
+| Summary | For a pod: status, owner, node, containers and labels. For a Deployment: replicas, strategy, selector, **Tail its pods** and **Show its pods**, conditions, images and labels. For a StatefulSet: replicas, Service, strategy, pod order, revision (current → update while they differ), selector, the same actions, conditions, images, volume claims and labels |
 | Events | Recent events for this object, newest first |
 | YAML | Read-only YAML with coloured keys and **Copy YAML**, without `managedFields` |
 
@@ -144,7 +145,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 | `⌘N` / `Ctrl+N` | Open a new window |
 | `⌘W` / `Ctrl+W` | Close the window |
 | `⌘Q` / `Ctrl+Q` | Quit |
-| `1` `2` | Go to Pods or Deployments. Each view keeps its own digit, in sidebar order: `3` StatefulSets, `4` DaemonSets, `5` Jobs, `6` Nodes, `7` Namespaces and `8` Events as they arrive |
+| `1` `2` `3` | Go to Pods, Deployments or StatefulSets. Each view keeps its own digit, in sidebar order: `4` DaemonSets, `5` Jobs, `6` Nodes, `7` Namespaces and `8` Events as they arrive |
 | `/` | Filter the current view |
 | `f` | Filter log lines |
 | `j` `k` or arrows | Move through rows |
@@ -170,7 +171,7 @@ Every action works from the keyboard. Single-letter keys work when no text field
 - `⌘K`, or the search field in the title bar, opens the palette over the panel.
 - Typing searches pods by name and namespace across the whole context, ignoring the filter and namespace picker. Text with a selector operator, such as `=`, `!=`, `in` or `!`, also offers to tail the pods it matches. Pods that need attention lead, and at most 20 show. Each row shows the pod's namespace on the right.
 - Choosing a pod selects it and opens its details. If the filter or namespace hid it, both clear first.
-- Below the pods, the palette lists the commands that apply now, including **Go to Pods** and **Go to Deployments**, then contexts and namespaces, with a check on the current ones.
+- Below the pods, the palette lists the commands that apply now, including **Go to** each view, such as **Go to Deployments**, then contexts and namespaces, with a check on the current ones.
 - Every command dispatches the same action as its key or button.
 - `Esc` clears the search, then closes the palette.
 - `?` opens the list of shortcuts, which `Esc` closes.

@@ -271,6 +271,110 @@ fn workload_objects() -> Vec<(String, String)> {
     ]
 }
 
+/// A workload kind's list at `/apis/{group_version}/{resource}`, and each object by path,
+/// from `(namespace, name, body)`.
+fn kind_objects(
+    group_version: &str,
+    resource: &str,
+    list_kind: &str,
+    items: &[(&str, &str, String)],
+) -> Vec<(String, String)> {
+    let bodies: Vec<_> = items.iter().map(|(_, _, body)| body.as_str()).collect();
+    let mut objects = vec![(
+        format!("/apis/{group_version}/{resource}"),
+        format!(
+            r#"{{"kind":"{list_kind}","apiVersion":"{group_version}","metadata":{{"resourceVersion":"1"}},"items":[{}]}}"#,
+            bodies.join(",")
+        ),
+    )];
+    objects.extend(items.iter().map(|(namespace, name, body)| {
+        (
+            format!("/apis/{group_version}/namespaces/{namespace}/{resource}/{name}"),
+            body.clone(),
+        )
+    }));
+    objects
+}
+
+/// StatefulSets as `(namespace, name, desired, ready, updated, update revision, strategy)`,
+/// with one that has no ready pod, one rolling out, one not ready, one waiting for its pods
+/// to be deleted and one scaled down. Every current revision is `{name}-6c8f9d`.
+const STATEFUL_SETS: [(&str, &str, u32, u32, u32, &str, &str); 8] = [
+    ("data", "kafka", 3, 0, 3, "kafka-6c8f9d", "RollingUpdate"),
+    (
+        "data",
+        "postgres-main",
+        3,
+        3,
+        1,
+        "postgres-main-7d4b2a",
+        "RollingUpdate",
+    ),
+    (
+        "data",
+        "redis-cache",
+        3,
+        2,
+        3,
+        "redis-cache-6c8f9d",
+        "RollingUpdate",
+    ),
+    ("data", "zookeeper", 3, 3, 0, "zookeeper-8e1c3f", "OnDelete"),
+    (
+        "data",
+        "elasticsearch-archive",
+        0,
+        0,
+        0,
+        "elasticsearch-archive-6c8f9d",
+        "RollingUpdate",
+    ),
+    (
+        "observability",
+        "prometheus",
+        2,
+        2,
+        2,
+        "prometheus-6c8f9d",
+        "RollingUpdate",
+    ),
+    (
+        "observability",
+        "loki",
+        3,
+        3,
+        3,
+        "loki-6c8f9d",
+        "RollingUpdate",
+    ),
+    (
+        "payments",
+        "ledger-db",
+        1,
+        1,
+        1,
+        "ledger-db-6c8f9d",
+        "RollingUpdate",
+    ),
+];
+
+fn stateful_set_objects(created: &str) -> Vec<(String, String)> {
+    let items: Vec<_> = STATEFUL_SETS
+        .iter()
+        .map(|&(namespace, name, desired, ready, updated, update, strategy)| {
+            let body = format!(
+                r#"{{"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{{"namespace":"{namespace}","name":"{name}","uid":"s-{name}","resourceVersion":"1","generation":4,"creationTimestamp":"{created}","labels":{{"app":"{name}","tier":"data"}},"managedFields":[{{"manager":"kubectl"}}]}},"spec":{{"replicas":{desired},"serviceName":"{name}-headless","podManagementPolicy":"OrderedReady","selector":{{"matchLabels":{{"app":"{name}"}}}},"updateStrategy":{{"type":"{strategy}"}},"template":{{"metadata":{{"labels":{{"app":"{name}"}}}},"spec":{{"containers":[{{"name":"{name}","image":"registry.example.com/{name}:3.7.1"}},{{"name":"exporter","image":"registry.example.com/metrics-exporter:0.15.0"}}]}}}},"volumeClaimTemplates":[{{"metadata":{{"name":"data"}},"spec":{{"accessModes":["ReadWriteOnce"],"storageClassName":"ssd","resources":{{"requests":{{"storage":"50Gi"}}}}}}}}]}},"status":{{"observedGeneration":4,"replicas":{desired},"readyReplicas":{ready},"currentReplicas":{current},"updatedReplicas":{updated},"availableReplicas":{ready},"currentRevision":"{name}-6c8f9d","updateRevision":"{update}"}}}}"#,
+                current = match update.ends_with("6c8f9d") {
+                    true => desired,
+                    false => desired - updated,
+                },
+            );
+            (namespace, name, body)
+        })
+        .collect();
+    kind_objects("apps/v1", "statefulsets", "StatefulSetList", &items)
+}
+
 fn pod_body(created: &str) -> String {
     format!(
         r#"{{"kind":"Pod","apiVersion":"v1","metadata":{{"namespace":"payments","name":"checkout-api-7f9c6d-h7vcd","uid":"3f1c9a7e-52ab-4b7e-9f55-0a0f6d1f1a11","resourceVersion":"188274","creationTimestamp":"{created}","labels":{{"app":"checkout-api","pod-template-hash":"7f9c6d","tier":"backend"}},"ownerReferences":[{{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"checkout-api-7f9c6d","uid":"9","controller":true}}],"managedFields":[{{"manager":"kube-controller-manager"}}]}},"spec":{{"nodeName":"node-07","restartPolicy":"Always","serviceAccountName":"checkout-api","containers":[{{"name":"app","image":"registry.example.com/checkout-api:2.31.0","ports":[{{"containerPort":8080,"protocol":"TCP"}}],"env":[{{"name":"POSTGRES_URL","value":"postgres://10.4.12.8:5432/checkout"}}],"resources":{{"limits":{{"memory":"512Mi"}},"requests":{{"cpu":"250m","memory":"256Mi"}}}}}},{{"name":"proxy","image":"registry.example.com/envoy:1.30.2"}}]}},"status":{{"phase":"Running","podIP":"10.4.3.21","hostIP":"10.0.7.4","containerStatuses":[{{"name":"app","image":"checkout-api:2.31.0","imageID":"x","ready":false,"restartCount":7,"state":{{"waiting":{{"reason":"CrashLoopBackOff"}}}},"lastState":{{"terminated":{{"exitCode":1,"reason":"Error"}}}}}},{{"name":"proxy","image":"envoy:1.30.2","imageID":"x","ready":true,"restartCount":0,"state":{{"running":{{"startedAt":"{created}"}}}}}}]}}}}"#
@@ -1070,6 +1174,15 @@ pub fn run(directory: PathBuf) {
         forbidden.save(&directory, &format!("no-permission-{suffix}.png"));
     }
 
+    workload_scenes(
+        &directory,
+        created,
+        stateful_set_objects(created),
+        View::StatefulSets,
+        "kafka",
+        ("statefulsets", "statefulset-details"),
+    );
+
     let mut empty = connected(&server, ThemeMode::Light);
     empty.set_namespace("billing");
     empty.save(&directory, "no-namespace-pods-light.png");
@@ -1081,4 +1194,39 @@ pub fn run(directory: PathBuf) {
 
     Scene::open(Contexts::from_yaml("{}"), ThemeMode::Dark)
         .save(&directory, "no-clusters-dark.png");
+}
+
+/// Renders a workload view's table, then the details of its first row, in dark and light,
+/// as `{table}-{theme}.png` and `{details}-{theme}.png`. `first` is a name in the table.
+fn workload_scenes(
+    directory: &Path,
+    created: &str,
+    objects: Vec<(String, String)>,
+    view: View,
+    first: &str,
+    (table, details): (&str, &str),
+) {
+    let server = serve(Fixture {
+        pod_list: pod_list(created),
+        pod: pod_body(created),
+        events: events_body(),
+        logs: log_body(),
+        live_logs: None,
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects,
+    });
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let mut scene = connected(&server, mode);
+        scene.show_view(view);
+        scene.wait_until(|window, _| !window.find_all_by_label(first).is_empty());
+        scene.save(directory, &format!("{table}-{suffix}.png"));
+        let root = scene.root.clone();
+        scene
+            .cx
+            .update(|cx| root.update(cx, |root, cx| root.select_first_row(cx)));
+        scene.wait_until(|window, _| window.try_find("details-title").is_some());
+        scene.settle();
+        scene.save(directory, &format!("{details}-{suffix}.png"));
+    }
 }

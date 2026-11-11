@@ -13,11 +13,13 @@ mod preview;
 mod root;
 mod rows;
 mod sidebar;
+mod statefulsets;
 mod table;
 mod theme;
 mod timeline;
 mod views;
 mod windows;
+mod workload;
 
 use std::path::PathBuf;
 use std::sync::Arc;

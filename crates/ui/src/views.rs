@@ -11,7 +11,8 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::*;
 use taffrail_core::{
-    Backend, Connection, DeploymentRow, Feed, Follow, ObjectKey, ResourceWatch, WatchError,
+    Backend, Connection, DeploymentRow, Feed, Follow, ObjectKey, ResourceWatch, StatefulSetRow,
+    WatchError,
 };
 
 use crate::details::{DetailsEvent, DetailsPane, Inspect, PaneTab};
@@ -23,23 +24,25 @@ use crate::table::{ResourceTable, SelectorFilter, column_names, show_in_place};
 pub enum View {
     Pods,
     Deployments,
+    StatefulSets,
 }
 
 impl View {
-    pub const ALL: [View; 2] = [View::Pods, View::Deployments];
+    pub const ALL: [View; 3] = [View::Pods, View::Deployments, View::StatefulSets];
 
     /// The sidebar label, which also names the view in saved state.
     pub fn name(self) -> &'static str {
         match self {
             View::Pods => "Pods",
             View::Deployments => "Deployments",
+            View::StatefulSets => "StatefulSets",
         }
     }
 
     /// The sidebar group, which the panel header names before the view.
     pub fn group(self) -> &'static str {
         match self {
-            View::Pods | View::Deployments => "Workloads",
+            View::Pods | View::Deployments | View::StatefulSets => "Workloads",
         }
     }
 
@@ -50,6 +53,7 @@ impl View {
         match self {
             View::Pods => "1",
             View::Deployments => "2",
+            View::StatefulSets => "3",
         }
     }
 
@@ -57,6 +61,7 @@ impl View {
         match self {
             View::Pods => IconName::Box,
             View::Deployments => IconName::Layers,
+            View::StatefulSets => IconName::Database,
         }
     }
 
@@ -107,6 +112,7 @@ pub fn new_panel(view: View, window: &mut Window, cx: &mut Context<Root>) -> Box
             view, window, cx,
         )),
         View::Deployments => Box::new(ResourcePanel::<DeploymentRow>::new(view, window, cx)),
+        View::StatefulSets => Box::new(ResourcePanel::<StatefulSetRow>::new(view, window, cx)),
     }
 }
 
