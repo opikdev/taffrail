@@ -14,9 +14,9 @@ The signature element is the log timeline, a strip above the log lines that show
 |  Pods 412 +------------------------------------+-----------------+
 |  Deploys  | Name         Status       Ready  Age | api-7f9c-x2k  |  Sidebar,
 |           | api-7f9c     ● Running    1/1    2h  | Summary       |  panel,
-| Network   | web-58d1     ● CrashLoop  0/1    4m  | Events        |  details
-| Config    |                                      | YAML          |
-| Cluster   +------------------------------------+-----------------+
+| Cluster   | web-58d1     ● CrashLoop  0/1    4m  | Events        |  details
+|  Nodes    |                                      | YAML          |
+|           +------------------------------------+-----------------+
 |           | Logs  Tailing 12   312 of 4,210  Level  Filter Pause |
 |           | ▁▁▂▁▁▁▂▁▁▁▁▂▃█▇▂▁▁▁▂▁  timeline                      |  Log dock
 | ● v1.35.0 | 10:42:07  api-7f9c  ERROR  connection refused        |
@@ -25,13 +25,14 @@ The signature element is the log timeline, a strip above the log lines that show
 
 - The title bar and sidebar sit on the window canvas. Everything you work in sits in one raised panel with a hairline border, inset from the window edge.
 - The title bar holds the context picker, with a brass badge showing the context's first letter.
-- The sidebar lists resources by group, with a neutral pill on the current one, and collapses to an icon rail. Selecting a resource opens its view. Resources without a view yet stay disabled.
+- The sidebar lists resources by group, with a neutral pill on the current one, and collapses to an icon rail. Selecting a resource opens its view. A resource appears once it has a view, and a group appears once it has a resource, so Services, Ingresses, ConfigMaps, Secrets and CronJobs stay hidden until version 0.2.
 - A resource shows its count once listed. A muted lock replaces the count when the API refused to list it, and the item's label adds **no permission**. Taffrail learns this from the list itself, and only for views it has opened. It does not ask the API in advance with a `SelfSubjectAccessReview`, because that is a create call and the app stays read-only.
 - The sidebar footer shows the connection. Anything that needs explaining appears in the panel, where there is room for a next step.
 - The details panel opens when you select a row, and closes with `Esc`.
 - The log dock stays open while you move between views. It can be resized or maximized.
 - Each window shows one context. Use **New window** to compare clusters.
 - **New window** opens on the same context, offset from the current window. Each window has its own session, which ends when the window closes. The app quits when the last window closes.
+- A window with nothing to restore opens at 1200 × 800, centred on the display. It can shrink to 760 × 480.
 - The app reopens where the last changed window was left, with its sidebar state, context, namespace, view and each view's columns. A context that no longer exists falls back to the kubeconfig's current context, and a window that no longer fits moves back onto the display.
 - This state lives in `taffrail/state.json` under the platform config directory. Apart from the context and namespace names, it holds nothing from a cluster.
 - **About Taffrail**, in the app menu and the palette, shows the version, the license, a link to the repository and a **Third-party licences** link. That link opens the notices file shipped with the app, or the project license online when there is none, such as under `cargo run`. `Esc` closes it.
@@ -267,7 +268,7 @@ GPUI reports an element to the platform's accessibility tree only when it has bo
 
 | Part | Reads as |
 |---|---|
-| Sidebar | A tree named **Resources**. Each item reads its name with its count, such as **Pods, 412**, or **no permission**, or **not available yet** for resources without a view |
+| Sidebar | A tree named **Resources**. Each item reads its name with its count, such as **Pods, 412**, or **no permission** |
 | Resource table | A table named after its view. Each row is selected or not, and reads its cells by column, such as **api-7f9c, Namespace shop, Status Running**. While the table has focus, the selected row is the focused node |
 | Status | A word in every status cell, the connection footer and the log severity column, never colour alone |
 | Details panel | A complementary region, such as **Pod details**, with the object's name as a heading, tabs that say which is selected, and links named **Go to deployment/api** |

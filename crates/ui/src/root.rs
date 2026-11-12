@@ -856,7 +856,7 @@ impl Root {
     }
 
     /// The rows the current view's watch has listed, once it has.
-    #[cfg(feature = "bench")]
+    #[cfg(any(feature = "bench", feature = "preview"))]
     pub(crate) fn synced_row_count(&self, cx: &App) -> Option<usize> {
         let status = self.panel().status(cx);
         (self.connection.is_some() && status.synced).then_some(status.total)

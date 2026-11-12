@@ -2,6 +2,8 @@ mod about;
 #[cfg(feature = "bench")]
 mod bench;
 mod daemonsets;
+#[cfg(feature = "preview")]
+mod demo;
 mod deployments;
 mod details;
 mod events;
@@ -36,6 +38,11 @@ fn main() {
     #[cfg(feature = "preview")]
     if let Some(directory) = std::env::var_os("TAFFRAIL_PREVIEW_DIR") {
         preview::run(directory.into());
+        return;
+    }
+    #[cfg(feature = "preview")]
+    if std::env::var_os("TAFFRAIL_DEMO").is_some_and(|demo| demo == "1") {
+        demo::run();
         return;
     }
     taffrail_core::use_login_shell_environment();

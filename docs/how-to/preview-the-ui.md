@@ -14,7 +14,7 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 
 | File | Shows |
 |---|---|
-| `readme-dark.png` | The README screenshot: one namespace, the details panel and a live tail across its pods |
+| `readme-dark.png` | What the README screenshot shows: one namespace, the details panel and a live tail across its pods |
 | `logs-dark.png`, `logs-light.png` | The pod table with a log tail |
 | `pods-dark.png` | The pod table alone |
 | `details-summary-dark.png`, `details-events-dark.png`, `details-yaml-dark.png` | Each tab of the details panel |
@@ -63,11 +63,19 @@ With `TAFFRAIL_PREVIEW_CONTEXT` set to a simulated context, such as `kwok-rbac-j
 
 ## Update the README screenshot
 
+The README shows a real macOS window, with its title bar controls and shadow, so the screenshot comes from the screen rather than from the previews. On macOS, run:
+
 ```sh
 scripts/screenshot.sh
 ```
 
-The script renders the previews in UTC, so log times match the sample timestamps on any machine. It resizes `readme-dark.png` to 1,600 px wide with `sips` on macOS or ImageMagick elsewhere, and writes it to `docs/images/taffrail.png`. Look at the image before you commit it.
+The script builds with `--features preview` and starts the app with `TAFFRAIL_DEMO=1`, which opens a normal window on the `readme-dark.png` sample cluster. It reads no kubeconfig, restores and saves no window state, and forces dark mode. The script runs it in UTC, so log times match the sample timestamps on any machine.
+
+After the window has drawn, the script captures it with `screencapture`, keeping its shadow, quits the app and writes `docs/images/taffrail.png` at full Retina resolution. It compresses the image with `pngquant` when it is installed, or re-encodes it with `sips`, and fails if the result is over 1.5 MB. Install `pngquant` with Homebrew to stay under that.
+
+Your terminal needs **Screen Recording** permission in **System Settings > Privacy & Security**. Leave the window alone until the script finishes, and look at the image before you commit it.
+
+To look at the demo yourself, run `TAFFRAIL_DEMO=1 cargo run -p taffrail-ui --features preview`. Release builds leave the demo out.
 
 ## Limits
 
