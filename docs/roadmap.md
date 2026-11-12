@@ -8,9 +8,9 @@ Each milestone ends with `scripts/bench.sh` inside the [performance budget](#per
 |---|---|---|
 | 1. Engine | Contexts, a live pod table and a merged log tail | Done |
 | 2. App shell | The layout, navigation and keyboard model everything else lives in | Done |
-| 3. Log explorer | Find a failure across pods without leaving the app | Next |
-| 4. Workload coverage | Read the resources that logs come from, and see what you cannot read | Planned |
-| 5. Version 0.1 | People can install it and trust it | Planned |
+| 3. Log explorer | Find a failure across pods without leaving the app | Done |
+| 4. Workload coverage | Read the resources that logs come from, and see what you cannot read | Done |
+| 5. Version 0.1 | People can install it and trust it | Released as 0.1.0 |
 
 ## Milestone 2: App shell
 
@@ -57,6 +57,12 @@ Build this first, because every later feature depends on its layout.
 - Test on a real cluster, which the project owner provides.
 
 **Done when:** someone else can install it and tail logs from their own cluster in five minutes.
+
+Version 0.1.0 shipped before three checks that need a person or a real cluster. They come next:
+
+- A test on a managed cluster, such as EKS or GKE, through its exec auth plugin.
+- A screen reader pass with VoiceOver, Narrator and Orca.
+- `scripts/bench.sh` on an uncovered window for the views added in milestones 3 and 4, and milestone 3's end-to-end check.
 
 ## Not in version 0.1
 
