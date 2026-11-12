@@ -21,6 +21,8 @@ const NARROW_WINDOW: (f32, f32) = (760., 480.);
 const WAIT_STEP: Duration = Duration::from_millis(20);
 const WAIT_STEPS: usize = 500;
 const SETTLE_FRAMES: usize = 30;
+/// When the sample pods were created.
+const CREATED: &str = "2026-11-05T08:00:00Z";
 
 const WORKLOADS: [(&str, &str, &str, &str, u32, &str); 10] = [
     (
@@ -1279,6 +1281,24 @@ fn tailing(server: &str, mode: ThemeMode) -> Scene {
     scene
 }
 
+/// The namespace the README screenshot shows.
+pub const README_NAMESPACE: &str = "payments";
+
+/// The cluster the README screenshot shows: the sample pods, with logs that stream as long
+/// as a tail stays open.
+pub fn readme_fixture() -> Fixture {
+    Fixture {
+        pod_list: pod_list(CREATED),
+        pod: pod_body(CREATED),
+        events: events_body(),
+        logs: String::new(),
+        live_logs: Some(&LOG_LINES),
+        forbidden: Vec::new(),
+        reconnect_logs: None,
+        objects: workload_objects(),
+    }
+}
+
 /// Drives the real app through its main states and writes each one to `directory`. With
 /// `TAFFRAIL_PREVIEW_CONTEXT`, it shows that simulated context instead.
 pub fn run(directory: PathBuf) {
@@ -1287,7 +1307,7 @@ pub fn run(directory: PathBuf) {
         simulated(&directory, &context);
         return;
     }
-    let created = "2026-11-05T08:00:00Z";
+    let created = CREATED;
     let server = serve(Fixture {
         pod_list: pod_list(created),
         pod: pod_body(created),
@@ -1300,18 +1320,9 @@ pub fn run(directory: PathBuf) {
     });
     assert!(WORKLOADS.len() * POD_SUFFIXES.len() > MAX_TAIL_PODS);
 
-    let live = serve(Fixture {
-        pod_list: pod_list(created),
-        pod: pod_body(created),
-        events: events_body(),
-        logs: String::new(),
-        live_logs: Some(&LOG_LINES),
-        forbidden: Vec::new(),
-        reconnect_logs: None,
-        objects: workload_objects(),
-    });
+    let live = serve(readme_fixture());
     let mut readme = connected(&live, ThemeMode::Dark);
-    readme.set_namespace("payments");
+    readme.set_namespace(README_NAMESPACE);
     let root = readme.root.clone();
     readme.cx.update(|cx| {
         root.update(cx, |root, cx| {

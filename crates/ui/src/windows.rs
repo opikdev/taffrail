@@ -22,6 +22,8 @@ const QUIT_KEY: &str = if cfg!(target_os = "macos") {
     "ctrl-q"
 };
 const MINIMUM_SIZE: (f32, f32) = (760., 480.);
+/// A window with nothing to restore opens at this size, centred on the display.
+const DEFAULT_SIZE: (f32, f32) = (1200., 800.);
 const NEW_WINDOW_OFFSET: f32 = 28.;
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 
@@ -91,12 +93,16 @@ pub fn open(
     cx: &mut App,
 ) -> Result<(AnyWindowHandle, Entity<Root>)> {
     let display = display_for(&saved, cx);
-    let window_bounds = saved.window.zip(display.as_ref()).map(|(rect, display)| {
+    let restored = saved.window.zip(display.as_ref()).map(|(rect, display)| {
         let visible = to_rect(display.visible_bounds());
-        WindowBounds::Windowed(to_bounds(rect.clamped(visible, MINIMUM_SIZE)))
+        to_bounds(rect.clamped(visible, MINIMUM_SIZE))
+    });
+    let bounds = restored.unwrap_or_else(|| {
+        let display_id = display.as_ref().map(|display| display.id());
+        Bounds::centered(display_id, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx)
     });
     let options = WindowOptions {
-        window_bounds,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id: display.map(|display| display.id()),
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
@@ -232,7 +238,7 @@ mod tests {
     use taffrail_core::{Backend, ClusterError, Contexts, SavedState, WindowRect};
     use tempfile::tempdir;
 
-    use super::{NEW_WINDOW_KEY, SAVE_DELAY, open, state_of};
+    use super::{DEFAULT_SIZE, NEW_WINDOW_KEY, SAVE_DELAY, open, state_of};
     use crate::root;
 
     const KUBECONFIG: &str = r#"
@@ -384,6 +390,21 @@ users:
             assert_eq!(window.find("toggle-sidebar").label(), Some("Show sidebar"));
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn opens_at_the_default_size_in_the_middle_of_the_display(cx: &mut TestAppContext) {
+        let backend = init(None, cx);
+
+        let handle = open_saved(&backend, SavedState::default(), cx);
+
+        let display = cx.update(|cx| cx.primary_display().unwrap().visible_bounds());
+        let window = state(handle, cx).window.unwrap();
+        assert_eq!((window.width, window.height), DEFAULT_SIZE);
+        assert_eq!(
+            (window.x + window.width / 2., window.y + window.height / 2.),
+            (display.center().x.as_f32(), display.center().y.as_f32())
+        );
     }
 
     #[gpui_kit::test]

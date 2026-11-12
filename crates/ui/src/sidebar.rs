@@ -47,7 +47,7 @@ const GROUPS: [(&str, &[(&str, IconName)]); 4] = [
     ),
 ];
 
-/// Every resource the sidebar lists, in order, whether or not it has a view yet.
+/// Every resource the sidebar can list, in order, whether or not it has a view yet.
 #[cfg(test)]
 pub fn sidebar_names() -> impl Iterator<Item = &'static str> {
     GROUPS
@@ -66,7 +66,24 @@ pub struct SidebarItem {
     pub forbidden: bool,
 }
 
-/// The resource navigation. Resources without a view yet are disabled.
+/// The groups the sidebar shows, with each resource that has a view. Resources without one
+/// are hidden until their view lands, and so is a group left empty.
+fn shown_groups(
+    items: &[SidebarItem],
+) -> impl Iterator<Item = (&'static str, Vec<(&'static str, IconName, SidebarItem)>)> {
+    GROUPS.into_iter().filter_map(|(group, resources)| {
+        let shown: Vec<_> = resources
+            .iter()
+            .filter_map(|&(name, icon)| {
+                let item = items.iter().find(|item| item.view.name() == name)?;
+                Some((name, icon, *item))
+            })
+            .collect();
+        (!shown.is_empty()).then_some((group, shown))
+    })
+}
+
+/// The resource navigation.
 pub fn resource_sidebar(
     items: &[SidebarItem],
     collapsed: bool,
@@ -77,23 +94,19 @@ pub fn resource_sidebar(
         .collapsed(collapsed)
         .border_r_0()
         .footer(footer)
-        .children(GROUPS.map(|(group, resources)| {
+        .children(shown_groups(items).map(|(group, resources)| {
             SidebarGroup::new(group).child(SidebarMenu::new().gap_0p5().mb_3().children(
-                resources.iter().map(|&(name, icon)| {
-                    let item = SidebarMenuItem::new(name).icon(Icon::new(icon));
-                    let Some(&SidebarItem {
+                resources.into_iter().map(|(name, icon, item)| {
+                    let SidebarItem {
                         view,
                         active,
                         count,
                         forbidden,
-                    }) = items.iter().find(|item| item.view.name() == name)
-                    else {
-                        return item
-                            .disable(true)
-                            .accessibility_label(item_label(name, None, false, false));
-                    };
-                    item.active(active)
-                        .accessibility_label(item_label(name, count, forbidden, true))
+                    } = item;
+                    SidebarMenuItem::new(name)
+                        .icon(Icon::new(icon))
+                        .active(active)
+                        .accessibility_label(item_label(name, count, forbidden))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(Box::new(ShowView { view }), cx);
                         })
@@ -124,30 +137,54 @@ pub fn resource_sidebar(
 }
 
 /// What a screen reader reads for a sidebar item, which shows its count or lock beside it.
-fn item_label(name: &str, count: Option<usize>, forbidden: bool, has_view: bool) -> String {
-    match (has_view, forbidden, count) {
-        (false, _, _) => format!("{name}, not available yet"),
-        (true, true, _) => format!("{name}, no permission"),
-        (true, false, Some(count)) => format!("{name}, {}", format_count(count)),
-        (true, false, None) => name.to_owned(),
+fn item_label(name: &str, count: Option<usize>, forbidden: bool) -> String {
+    match (forbidden, count) {
+        (true, _) => format!("{name}, no permission"),
+        (false, Some(count)) => format!("{name}, {}", format_count(count)),
+        (false, None) => name.to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::item_label;
+    use super::{SidebarItem, item_label, shown_groups};
+    use crate::views::View;
 
     #[test]
     fn an_item_reads_its_count_or_why_it_has_none() {
-        assert_eq!(item_label("Pods", Some(1_204), false, true), "Pods, 1,204");
-        assert_eq!(item_label("Pods", None, false, true), "Pods");
+        assert_eq!(item_label("Pods", Some(1_204), false), "Pods, 1,204");
+        assert_eq!(item_label("Pods", None, false), "Pods");
         assert_eq!(
-            item_label("Deployments", Some(3), true, true),
+            item_label("Deployments", Some(3), true),
             "Deployments, no permission"
         );
+    }
+
+    #[test]
+    fn hides_resources_without_a_view_and_groups_left_empty() {
+        let items = View::ALL.map(|view| SidebarItem {
+            view,
+            active: false,
+            count: None,
+            forbidden: false,
+        });
+
+        let shown: Vec<_> = shown_groups(&items)
+            .map(|(group, resources)| {
+                let names: Vec<_> = resources.into_iter().map(|(name, ..)| name).collect();
+                (group, names)
+            })
+            .collect();
+
         assert_eq!(
-            item_label("CronJobs", None, false, false),
-            "CronJobs, not available yet"
+            shown,
+            [
+                (
+                    "Workloads",
+                    vec!["Pods", "Deployments", "StatefulSets", "DaemonSets", "Jobs"]
+                ),
+                ("Cluster", vec!["Nodes", "Namespaces", "Events"]),
+            ]
         );
     }
 }
