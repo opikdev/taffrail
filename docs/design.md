@@ -243,7 +243,7 @@ A test checks that every text colour measures at least 4.5:1 on every surface, i
 
 ## App icon
 
-The icon shows the register dial of a taffrail log, with its line trailed off to a brass rotator. It sits on a dark tile on the macOS icon grid: an 824 px rounded square inside a 1024 px canvas.
+The icon shows three log streams merging into one live tail, which is what Taffrail does with many pods. The streams use the app's text colours and the merged tail its amber accent, the dark theme's `ring` colour `#E0AE4B`, so the icon uses no colour the app doesn't. It sits on a dark tile on the macOS icon grid: an 824 px rounded square inside a 1024 px canvas.
 
 The source is `crates/ui/assets/icon/icon.svg`. After changing it, run `scripts/render-icons.sh` on macOS to render the PNG, `.icns` and `.ico` files beside it, and commit them. The script needs `resvg`, from `cargo install resvg --locked`. The app's bundle identifier is `dev.opik.taffrail`.
 

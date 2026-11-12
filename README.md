@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="crates/ui/assets/icon/256x256.png" width="96" height="96" alt="Taffrail logo">
+</p>
+
 <h1 align="center">Taffrail</h1>
 
 <p align="center">
@@ -16,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/taffrail.png" alt="Taffrail in dark mode showing the pods in the payments namespace, with a crash-looping checkout-api pod selected, its summary in the details panel, and a log dock below merging live lines from 30 containers">
+  <img src="docs/images/taffrail.png" alt="The Taffrail window in dark mode on macOS, showing the pods in the payments namespace with a crash-looping checkout-api pod selected and its summary in the details panel. Below, a log dock merges live lines from 30 containers under a timeline of errors, warnings and info lines">
 </p>
 
 Taffrail is a free, open source desktop app for macOS, Windows and Linux, written in Rust on GPUI. It helps you find what is wrong in a running cluster, starting from its logs. The name comes from the taffrail log, a ship's instrument trailed off the stern.
