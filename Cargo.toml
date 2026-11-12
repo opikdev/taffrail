@@ -34,3 +34,7 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+
+# Release binaries ship without symbols: the Apple silicon binary drops from 48 MB to 35 MB.
+[profile.release]
+strip = "symbols"
