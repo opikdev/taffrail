@@ -1,13 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- The register dial of a taffrail log, with its line trailed off to the rotator. -->
+  <!-- Logs from many pods merging into one live tail, in the app's amber accent. -->
   <defs>
     <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#26272B"/>
-      <stop offset="1" stop-color="#121315"/>
-    </linearGradient>
-    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#EBC067"/>
-      <stop offset="1" stop-color="#D49A32"/>
+      <stop offset="0" stop-color="#2A2B2F"/>
+      <stop offset="1" stop-color="#101113"/>
     </linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
       <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
@@ -15,13 +11,10 @@
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
   <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="4"/>
-  <g transform="translate(470 450)">
-    <path d="M -198 198 A 280 280 0 1 1 198 198" fill="none" stroke="#E9E9E7" stroke-width="44" stroke-linecap="round"/>
-    <path d="M 0 0 C 0 180 60 260 230 330" fill="none" stroke="#9C9DA1" stroke-width="24" stroke-linecap="round"/>
-    <g transform="translate(268 345) rotate(22)">
-      <path d="M -70 0 C -70 -24 -54 -34 -30 -34 L 30 -30 L 92 -62 L 78 -14 L 78 14 L 92 62 L 30 30 L -30 34 C -54 34 -70 24 -70 0 Z" fill="url(#brass)"/>
-    </g>
-    <path d="M -26 10 L 150 -150 L 10 26 Z" fill="url(#brass)" stroke="url(#brass)" stroke-width="28" stroke-linejoin="round"/>
-    <circle r="52" fill="url(#brass)"/>
+  <g fill="none" stroke-linecap="round" stroke-width="60">
+    <path d="M 262 332 C 412 332 432 512 572 512" stroke="#9C9DA1"/>
+    <path d="M 262 692 C 412 692 432 512 572 512" stroke="#9C9DA1"/>
+    <path d="M 262 512 H 572" stroke="#E9E9E7"/>
+    <path d="M 572 512 H 762" stroke="#E0AE4B"/>
   </g>
 </svg>
