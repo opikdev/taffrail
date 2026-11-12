@@ -67,7 +67,8 @@ signing-identity = "-"
 [package.metadata.packager.deb]
 desktop-template = "packaging/taffrail.desktop"
 section = "devel"
-# The binary links libxcb and libxkbcommon, and loads Vulkan, Wayland and fontconfig at run time.
+# The binary links libxcb and libxkbcommon, and loads Vulkan, EGL for the OpenGL fallback,
+# Wayland and fontconfig at run time.
 depends = [
     "libc6",
     "libgcc-s1",
@@ -78,6 +79,7 @@ depends = [
     "libwayland-client0",
     "libfontconfig1",
     "libfreetype6",
+    "libegl1",
 ]
 
 [package.metadata.packager.deb.files]
