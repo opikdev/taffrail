@@ -20,4 +20,4 @@ Use [private vulnerability reporting](https://github.com/opikdev/taffrail/securi
 
 ## Supported versions
 
-Taffrail has no releases yet. Reports apply to the `main` branch.
+Only the latest release gets security fixes, currently 0.1.x. Reports about the `main` branch are welcome too.

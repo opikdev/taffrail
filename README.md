@@ -9,12 +9,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/opikdev/taffrail/releases/latest"><img src="https://img.shields.io/github/v/release/opikdev/taffrail" alt="Latest release"></a>
   <a href="https://github.com/opikdev/taffrail/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/opikdev/taffrail/ci.yml?branch=main&label=CI" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/opikdev/taffrail" alt="License: Apache-2.0"></a>
 </p>
 
 <p align="center">
-  <a href="#build-from-source"><b>Build from source</b></a> ·
+  <a href="https://github.com/opikdev/taffrail/releases/latest"><b>Download</b></a> ·
+  <a href="docs/install.md">Install guide</a> ·
   <a href="docs/privacy.md">Privacy</a> ·
   <a href="docs/roadmap.md">Roadmap</a>
 </p>
@@ -29,7 +31,19 @@ Taffrail is a free, open source desktop app for macOS, Windows and Linux, writte
 - **One merged log tail.** Tail up to 50 pods at once, in one view, with each line marked by its source.
 - **Keyboard first.** Every action works from the keyboard, and the command palette finds any pod, command, context or namespace.
 
-**Status:** early development. There are no releases yet, so [build it from source](#build-from-source). See [the roadmap](docs/roadmap.md) for what comes next.
+## Install
+
+Download the installer for your system from the [latest release](https://github.com/opikdev/taffrail/releases/latest):
+
+| System | Download |
+|---|---|
+| macOS 11 or later, Apple silicon and Intel | `.dmg` |
+| Windows 10 and 11 | `-setup.exe` or `.msi` |
+| Linux | `.deb`, `.AppImage` or `.tar.gz` |
+
+Taffrail isn't code signed yet, so macOS and Windows warn you the first time you open it. [Install Taffrail](docs/install.md) shows how to get past that.
+
+Version 0.1 covers pods, deployments, stateful sets, daemon sets, jobs, nodes, namespaces and events. See [the roadmap](docs/roadmap.md) for what comes next.
 
 ## Your cluster stays yours
 
